@@ -73,7 +73,7 @@ jobs:
 
       # Unpack the solution
       - name: unpack solution
-        uses: microsoft/powerplatform-actions/unpack-solution@v0
+        uses: microsoft/powerplatform-actions/unpack-solution@v1
         with:
           solution-file: "${{ github.event.inputs.solution_name }}.zip"
           solution-folder: "${{ github.event.repository.name }}"
