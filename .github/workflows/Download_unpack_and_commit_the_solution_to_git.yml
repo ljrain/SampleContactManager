@@ -1,31 +1,32 @@
-name: Download, unpack and commit the solution to git
-run-name: Getting ${{ github.event.inputs.solution_name }} from pipelines host environment and committing
+name: Download, unpack, and commit solution to git
+
+run-name: Getting ${{ github.event.inputs.solution_name }} from pipelines host and committing
 
 on:
   workflow_dispatch:
     inputs:
       artifact_url:
-        description: "The url of the Dataverse record ID for the artifact created by the pipelines (Example: https://[your-env].crm.dynamics.com/api/data/v9.0/deploymentartifacts([your-artifact-id])/artifactfile/$value)."
+        description: "Dataverse deployment artifact URL (…/deploymentartifacts(<id>)/artifactfile/$value)"
         required: true
         type: string
       solution_name:
-        description: "Name of the Solution in Dataverse environment"
+        description: "Name of the Dataverse solution"
         required: true
         type: string
       user_name:
-        description: "User name for the commit"
+        description: "User name for git commit"
         required: true
         type: string
       source_branch:
-        description: "Branch for the solution commit"
+        description: "Source branch for commit"
         required: true
         type: string
       target_branch:
-        description: "Branch to create for the solution commit (optional). If blank, source_branch is used."
+        description: "Optional branch to create"
         required: false
         type: string
       commit_message:
-        description: "Message to provide for the commit"
+        description: "Commit message"
         required: true
         type: string
 
@@ -39,68 +40,59 @@ concurrency:
 jobs:
   export-unpack-commit:
     runs-on: ubuntu-latest
+
+    # ✅ THIS IS THE CRITICAL FIX
+    environment: MAIN
+
     env:
       CLIENT_ID: ${{ secrets.CLIENT_ID }}
       TENANT_ID: ${{ secrets.TENANT_ID }}
       CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
 
     steps:
-      # Recommended when Power Platform tooling/action downloads are flaky: install tools first. [2](https://learn.microsoft.com/en-us/power-platform/alm/devops-github-available-actions)
       - name: Install Power Platform Tools
         uses: microsoft/powerplatform-actions/actions-install@v1
 
-      # Normalize branch names to prevent "invalid refspec Source Branch" errors
       - name: Normalize branches
         id: branches
         shell: bash
         run: |
-          SB="${{ github.event.inputs.source_branch }}"
-          TB="${{ github.event.inputs.target_branch }}"
+          SB="$(echo '${{ github.event.inputs.source_branch }}' | xargs)"
+          TB="$(echo '${{ github.event.inputs.target_branch }}' | xargs)"
 
-          # Trim whitespace
-          SB="$(echo "$SB" | xargs)"
-          TB="$(echo "$TB" | xargs)"
-
-          # Guard against placeholder values (common in Power Automate / templates)
-          if [[ -z "$SB" || "$SB" == "Source Branch" || "$SB" == "SourceBranch" ]]; then
+          if [[ "$SB" == "Source Branch" || "$SB" == "SourceBranch" || -z "$SB" ]]; then
             SB="main"
           fi
 
-          echo "source_branch=$SB" >> "$GITHUB_OUTPUT"
-          echo "target_branch=$TB" >> "$GITHUB_OUTPUT"
+          echo "source_branch=$SB" >> $GITHUB_OUTPUT
+          echo "target_branch=$TB" >> $GITHUB_OUTPUT
 
-      - name: Checkout repository (source branch)
+      - name: Checkout repository
         uses: actions/checkout@v3
         with:
           ref: ${{ steps.branches.outputs.source_branch }}
           fetch-depth: 1
 
-      - name: Create new branch (if target_branch specified)
+      - name: Create target branch (if specified)
         if: ${{ steps.branches.outputs.target_branch != '' }}
         shell: pwsh
         run: |
           git checkout -b "${{ steps.branches.outputs.target_branch }}"
 
-      - name: Download solution from artifact (managed + unmanaged)
+      - name: Download solution from pipelines artifact
         shell: pwsh
         run: |
-          # Fail fast if secrets weren't injected
-          if ([string]::IsNullOrWhiteSpace($env:CLIENT_ID) -or
-              [string]::IsNullOrWhiteSpace($env:TENANT_ID) -or
-              [string]::IsNullOrWhiteSpace($env:CLIENT_SECRET)) {
-            throw "Missing required secrets. Ensure CLIENT_ID, TENANT_ID, CLIENT_SECRET are set in GitHub repo secrets."
+          if ([string]::IsNullOrWhiteSpace($env:CLIENT_ID) `
+           -or [string]::IsNullOrWhiteSpace($env:TENANT_ID) `
+           -or [string]::IsNullOrWhiteSpace($env:CLIENT_SECRET)) {
+            throw "Missing required secrets: CLIENT_ID, TENANT_ID, CLIENT_SECRET"
           }
 
-          $aadHost   = "https://login.microsoftonline.com"
-          $tenantId  = $env:TENANT_ID
           $artifactUrl = "${{ github.event.inputs.artifact_url }}"
-
-          # Derive Dataverse host (e.g., https://org.crm.dynamics.com) from artifact URL
           $uri = [System.Uri]$artifactUrl
-          $dataverseHost = "https://$($uri.Host)"
+          $dataverseHost = "$($uri.Scheme)://$($uri.Host)"
 
-          # Build token endpoint explicitly (prevents the 404 you saw)
-          $tokenUri = "$aadHost/$tenantId/oauth2/v2.0/token"
+          $tokenUri = "https://login.microsoftonline.com/$($env:TENANT_ID)/oauth2/v2.0/token"
 
           $body = @{
             client_id     = $env:CLIENT_ID
@@ -109,47 +101,48 @@ jobs:
             scope         = "$dataverseHost/.default"
           }
 
-          $oauthReq = Invoke-RestMethod -Method Post -Uri $tokenUri -Body $body -ContentType "application/x-www-form-urlencoded"
-          $spnToken = $oauthReq.access_token
+          $oauthReq = Invoke-RestMethod `
+            -Method Post `
+            -Uri $tokenUri `
+            -Body $body `
+            -ContentType "application/x-www-form-urlencoded"
 
-          $headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
-          $headers.Add("Authorization", "Bearer $spnToken")
-          $headers.Add("Content-Type", "application/json")
+          $headers = @{
+            Authorization = "Bearer $($oauthReq.access_token)"
+            "Content-Type" = "application/json"
+          }
 
-          # Managed artifact download
+          # Managed
           $respManaged = Invoke-RestMethod -Uri $artifactUrl -Method GET -Headers $headers
-          $bytesManaged = [System.Convert]::FromBase64String($respManaged.value)
-          [System.IO.File]::WriteAllBytes("${{ github.event.inputs.solution_name }}_managed.zip", $bytesManaged)
+          $bytesManaged = [Convert]::FromBase64String($respManaged.value)
+          [IO.File]::WriteAllBytes("${{ github.event.inputs.solution_name }}_managed.zip", $bytesManaged)
 
-          # Unmanaged artifact download (swap artifactfile -> artifactfileunmanaged)
+          # Unmanaged
           $unmanagedUrl = $artifactUrl.Replace("artifactfile", "artifactfileunmanaged")
           $respUnmanaged = Invoke-RestMethod -Uri $unmanagedUrl -Method GET -Headers $headers
-          $bytesUnmanaged = [System.Convert]::FromBase64String($respUnmanaged.value)
-          [System.IO.File]::WriteAllBytes("${{ github.event.inputs.solution_name }}.zip", $bytesUnmanaged)
+          $bytesUnmanaged = [Convert]::FromBase64String($respUnmanaged.value)
+          [IO.File]::WriteAllBytes("${{ github.event.inputs.solution_name }}.zip", $bytesUnmanaged)
 
       - name: Unpack unmanaged solution
         uses: microsoft/powerplatform-actions/unpack-solution@v1
         with:
           solution-file: "${{ github.event.inputs.solution_name }}.zip"
-          solution-folder: "${{ github.event.repository.name }}"
-          solution-type: "Unmanaged"
+          solution-folder: "${{ github.repository }}"
+          solution-type: Unmanaged
           process-canvas-apps: false
           overwrite-files: true
 
       - name: Commit changes
         shell: pwsh
         run: |
-          Remove-Item -Force "${{ github.event.inputs.solution_name }}.zip" -ErrorAction SilentlyContinue
-          Remove-Item -Force "${{ github.event.inputs.solution_name }}_managed.zip" -ErrorAction SilentlyContinue
-
+          Remove-Item *.zip -Force -ErrorAction SilentlyContinue
           git config user.name "${{ github.event.inputs.user_name }}"
           git config user.email "github-actions@users.noreply.github.com"
-
           git pull
           git add -A
           git commit -m "${{ github.event.inputs.commit_message }}" --allow-empty
 
-      - name: Push committed changes
+      - name: Push changes
         shell: pwsh
         run: |
           if ("${{ steps.branches.outputs.target_branch }}" -ne "") {
