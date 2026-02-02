@@ -1,4 +1,4 @@
-name: Download, unpack and commit solution to git
+name: Download, unpack and commit the solution to git
 run-name: Getting ${{ github.event.inputs.solution_name }} from pipelines host environment and committing
 
 on:
@@ -21,7 +21,7 @@ on:
         required: true
         type: string
       target_branch:
-        description: "Branch to create for the solution commit"
+        description: "Branch to create for the solution commit (optional). If blank, source_branch is used."
         required: false
         type: string
       commit_message:
@@ -32,51 +32,84 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: pipelines-export-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   export-unpack-commit:
     runs-on: ubuntu-latest
+    env:
+      CLIENT_ID: ${{ secrets.CLIENT_ID }}
+      TENANT_ID: ${{ secrets.TENANT_ID }}
+      CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
 
     steps:
-      # Recommended mitigation for Power Platform action install/download timeouts:
-      # Install tools first and use v1 actions. [1](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)
+      # Recommended when Power Platform tooling/action downloads are flaky: install tools first. [2](https://learn.microsoft.com/en-us/power-platform/alm/devops-github-available-actions)
       - name: Install Power Platform Tools
         uses: microsoft/powerplatform-actions/actions-install@v1
 
-      - name: Checkout repo at source branch
+      # Normalize branch names to prevent "invalid refspec Source Branch" errors
+      - name: Normalize branches
+        id: branches
+        shell: bash
+        run: |
+          SB="${{ github.event.inputs.source_branch }}"
+          TB="${{ github.event.inputs.target_branch }}"
+
+          # Trim whitespace
+          SB="$(echo "$SB" | xargs)"
+          TB="$(echo "$TB" | xargs)"
+
+          # Guard against placeholder values (common in Power Automate / templates)
+          if [[ -z "$SB" || "$SB" == "Source Branch" || "$SB" == "SourceBranch" ]]; then
+            SB="main"
+          fi
+
+          echo "source_branch=$SB" >> "$GITHUB_OUTPUT"
+          echo "target_branch=$TB" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository (source branch)
         uses: actions/checkout@v3
         with:
-          ref: ${{ github.event.inputs.source_branch }}
+          ref: ${{ steps.branches.outputs.source_branch }}
+          fetch-depth: 1
 
-      - name: Create new branch if target_branch specified
+      - name: Create new branch (if target_branch specified)
+        if: ${{ steps.branches.outputs.target_branch != '' }}
         shell: pwsh
         run: |
-          if ('${{ github.event.inputs.target_branch }}' -ne '') {
-            git checkout -b '${{ github.event.inputs.target_branch }}'
+          git checkout -b "${{ steps.branches.outputs.target_branch }}"
+
+      - name: Download solution from artifact (managed + unmanaged)
+        shell: pwsh
+        run: |
+          # Fail fast if secrets weren't injected
+          if ([string]::IsNullOrWhiteSpace($env:CLIENT_ID) -or
+              [string]::IsNullOrWhiteSpace($env:TENANT_ID) -or
+              [string]::IsNullOrWhiteSpace($env:CLIENT_SECRET)) {
+            throw "Missing required secrets. Ensure CLIENT_ID, TENANT_ID, CLIENT_SECRET are set in GitHub repo secrets."
           }
 
-      - name: Download solution from pipelines artifact (managed + unmanaged)
-        shell: pwsh
-        env:
-          CLIENT_ID: ${{ secrets.CLIENT_ID }}
-          TENANT_ID: ${{ secrets.TENANT_ID }}
-          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
-        run: |
-          $aadHost = "https://login.microsoftonline.com"
+          $aadHost   = "https://login.microsoftonline.com"
+          $tenantId  = $env:TENANT_ID
           $artifactUrl = "${{ github.event.inputs.artifact_url }}"
 
-          # Derive the Dataverse host from the artifact URL (https://{org}.crm.dynamics.com/...)
-          $parts = $artifactUrl.Split('/', [System.StringSplitOptions]::RemoveEmptyEntries)
-          $dataverseHost = "https://" + $parts[1]
-          $scope = "$dataverseHost/.default"
+          # Derive Dataverse host (e.g., https://org.crm.dynamics.com) from artifact URL
+          $uri = [System.Uri]$artifactUrl
+          $dataverseHost = "https://$($uri.Host)"
+
+          # Build token endpoint explicitly (prevents the 404 you saw)
+          $tokenUri = "$aadHost/$tenantId/oauth2/v2.0/token"
 
           $body = @{
             client_id     = $env:CLIENT_ID
             client_secret = $env:CLIENT_SECRET
             grant_type    = "client_credentials"
-            scope         = $scope
+            scope         = "$dataverseHost/.default"
           }
 
-          $oauthReq = Invoke-RestMethod -Method Post -Uri "$aadHost/$($env:TENANT_ID)/oauth2/v2.0/token" -Body $body
+          $oauthReq = Invoke-RestMethod -Method Post -Uri $tokenUri -Body $body -ContentType "application/x-www-form-urlencoded"
           $spnToken = $oauthReq.access_token
 
           $headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
@@ -97,9 +130,9 @@ jobs:
       - name: Unpack unmanaged solution
         uses: microsoft/powerplatform-actions/unpack-solution@v1
         with:
-          solution-file: ${{ github.event.inputs.solution_name }}.zip
-          solution-folder: ${{ github.event.repository.name }}/${{ github.event.inputs.solution_name }}
-          solution-type: Unmanaged
+          solution-file: "${{ github.event.inputs.solution_name }}.zip"
+          solution-folder: "${{ github.event.repository.name }}"
+          solution-type: "Unmanaged"
           process-canvas-apps: false
           overwrite-files: true
 
@@ -110,7 +143,7 @@ jobs:
           Remove-Item -Force "${{ github.event.inputs.solution_name }}_managed.zip" -ErrorAction SilentlyContinue
 
           git config user.name "${{ github.event.inputs.user_name }}"
-          git config user.email "${{ github.event.inputs.user_name }}@users.noreply.github.com"
+          git config user.email "github-actions@users.noreply.github.com"
 
           git pull
           git add -A
@@ -119,8 +152,8 @@ jobs:
       - name: Push committed changes
         shell: pwsh
         run: |
-          if ('${{ github.event.inputs.target_branch }}' -ne '') {
-            git push origin '${{ github.event.inputs.target_branch }}'
+          if ("${{ steps.branches.outputs.target_branch }}" -ne "") {
+            git push origin "${{ steps.branches.outputs.target_branch }}"
           } else {
-            git push origin '${{ github.event.inputs.source_branch }}'
+            git push origin "${{ steps.branches.outputs.source_branch }}"
           }
