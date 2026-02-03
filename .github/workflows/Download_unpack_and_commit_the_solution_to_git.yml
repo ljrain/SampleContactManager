@@ -1,7 +1,7 @@
 # Export a Dataverse solution (Unmanaged + Managed), validate ZIPs, unpack to repo, and push to a versioned branch.
 # Fed/DoD-friendly: no deployments/imports; PR is the approval gate.
 
-name: Export Power Platform Solution (Dual Export, Versioned)
+name: Export Power Platform Solution (Dual Export, Versioned Branch Suffix)
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ on:
         default: "main"
         type: string
       target_branch:
-        description: "Optional target branch. If blank, auto-generates <solution>-<version>-<YYYYMMDD-HHMM>"
+        description: "Optional target branch. If blank, auto-generates <solution>-<YYYYMMDD-HHMM>-<version>"
         required: false
         default: ""
         type: string
@@ -72,7 +72,7 @@ jobs:
         uses: microsoft/powerplatform-actions/actions-install@v1
 
       # Get solution version BEFORE export so it can be used in ZIP filenames and the branch name.
-      # Fixes common bash issue where $select/$filter get interpreted as shell variables under set -u.
+      # Uses curl --data-urlencode to avoid bash treating $select/$filter as shell variables.
       - name: Get solution version (Dataverse Web API)
         shell: bash
         env:
@@ -85,7 +85,7 @@ jobs:
           ENV_URL="${{ inputs.environment_url }}"
           SOL_NAME="${{ inputs.solution_name }}"
 
-          # Extract host from URL (no python required)
+          # Extract host from URL
           DATAVERSE_HOST="${ENV_URL#*://}"
           DATAVERSE_HOST="${DATAVERSE_HOST%%/*}"
 
@@ -117,7 +117,8 @@ jobs:
           echo "SOLUTION_VERSION_SAFE=$(echo "$VERSION" | tr '.' '_')" >> "$GITHUB_ENV"
           echo "Resolved solution version: $VERSION"
 
-      - name: Resolve target branch (versioned)
+      # UPDATED: branch naming convention uses version at the END: <solution>-<timestamp>-<version>
+      - name: Resolve target branch (version suffix)
         shell: bash
         run: |
           set -euo pipefail
@@ -127,7 +128,7 @@ jobs:
           SAFE_SOL=$(echo "$SOL" | sed -E 's/[^a-zA-Z0-9_-]+/-/g' | sed -E 's/^-+|-+$//g')
 
           if [[ -z "$IN_TARGET" ]]; then
-            TARGET="${SAFE_SOL}-${SOLUTION_VERSION_SAFE}-${TS}"
+            TARGET="${SAFE_SOL}-${TS}-${SOLUTION_VERSION_SAFE}"
           else
             TARGET="$IN_TARGET"
           fi
