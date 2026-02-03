@@ -6,38 +6,41 @@ on:
   workflow_dispatch:
     inputs:
       environment_url:
-        description: "Dataverse environment URL (ex: https://yourenv.crm.dynamics.com)"
+        description: "Dataverse environment URL (example: https://your-env.crm9.dynamics.com)"
         required: true
-        default: "https://lougcc.crm9.dynamics.com/"
         type: string
       solution_name:
         description: "Solution unique name in Dataverse"
         required: true
-        default: "sample"
         type: string
       source_branch:
         description: "Branch to start from"
-        required: false
+        required: true
         default: "main"
         type: string
       target_branch:
-        description: "Branch to commit into (optional; defaults to source_branch)"
+        description: "Branch to commit into (optional; defaults to source_branch if blank)"
         required: false
         default: ""
         type: string
-      commit_message:
-        description: "Commit message"
-        required: false
-        default: "Export solution from Power Platform"
-        type: string
       solution_type:
-        description: "Unmanaged or Managed"
-        required: false
+        description: "Unmanaged or Managed export"
+        required: true
         default: "Unmanaged"
         type: choice
         options:
           - Unmanaged
           - Managed
+      commit_message:
+        description: "Commit message"
+        required: true
+        default: "Export solution from Power Platform"
+        type: string
+      user_name:
+        description: "Git commit username"
+        required: true
+        default: "github-actions[bot]"
+        type: string
 
 permissions:
   contents: write
@@ -45,6 +48,9 @@ permissions:
 jobs:
   export-unpack-commit:
     runs-on: windows-latest
+
+    # IMPORTANT: This must match your GitHub Environment name where secrets live
+    environment: MAIN
 
     steps:
       - name: Checkout
@@ -64,44 +70,22 @@ jobs:
           "SOURCE_BRANCH=$source" | Out-File -FilePath $env:GITHUB_ENV -Append
           "TARGET_BRANCH=$target" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+          Write-Host "SOURCE_BRANCH=$source"
+          Write-Host "TARGET_BRANCH=$target"
+
       - name: Create target branch (if different)
         shell: pwsh
         run: |
-          if ("${{ env.TARGET_BRANCH }}" -ne "${{ env.SOURCE_BRANCH }}") {
-            git checkout -b "${{ env.TARGET_BRANCH }}" "${{ env.SOURCE_BRANCH }}"
+          if ($env:TARGET_BRANCH -ne $env:SOURCE_BRANCH) {
+            git checkout -b $env:TARGET_BRANCH $env:SOURCE_BRANCH
+          } else {
+            git checkout $env:SOURCE_BRANCH
           }
 
-      # This is the direct export pattern you referenced:
-      # microsoft/powerplatform-actions/export-solution@v0 with environment-url/app-id/client-secret/tenant-id/solution-name [1](https://teams.microsoft.com/l/message/19:meeting_ZWI2ZWU0NzMtN2EyYi00MDc2LTljYTktZWMwYzBmN2M0YzAz@thread.v2/1759162120322?context=%7B%22contextType%22:%22chat%22%7D)[2](https://microsoft-my.sharepoint.com/personal/tidarius_microsoft_com/_layouts/15/Doc.aspx?sourcedoc=%7B2C79661B-A00C-45D2-96CB-DDF9143922EB%7D&file=ALM_GitHubActions_wPP%201.vsdx&action=default&mobileredirect=true&DefaultItemOpen=1)[3](https://microsoft-my.sharepoint.com/personal/tidarius_microsoft_com/_layouts/15/Doc.aspx?sourcedoc=%7B467298BA-9545-4F3D-9CD6-BA27BEB27612%7D&file=ALM_GitHubActions_wPP.vsdx&action=default&mobileredirect=true&DefaultItemOpen=1)
-      - name: Export solution
-        uses: microsoft/powerplatform-actions/export-solution@v0
-        with:
-          environment-url: ${{ github.event.inputs.environment_url }}
-          app-id: ${{ secrets.CLIENT_ID }}
-          client-secret: ${{ secrets.CLIENT_SECRET }}
-          tenant-id: ${{ secrets.TENANT_ID }}
-          solution-name: ${{ github.event.inputs.solution_name }}
-          solution-output-file: out/exported/${{ github.event.inputs.solution_name }}.zip
-          solution-type: ${{ github.event.inputs.solution_type }}
-
-      - name: Unpack solution
-        uses: microsoft/powerplatform-actions/unpack-solution@v0
-        with:
-          solution-file: out/exported/${{ github.event.inputs.solution_name }}.zip
-          solution-folder: solutions/${{ github.event.inputs.solution_name }}
-          solution-type: ${{ github.event.inputs.solution_type }}
-          overwrite-files: true
-
-      - name: Commit changes
+      # Optional, SAFE validation: confirms secrets are injected (does not print values)
+      - name: Validate auth secrets injected (safe)
         shell: pwsh
         run: |
-          git config user.name "${{ github.actor }}"
-          git config user.email "${{ github.actor }}@users.noreply.github.com"
-
-          git add --all
-          git commit -m "${{ github.event.inputs.commit_message }}" --allow-empty
-
-      - name: Push branch
-        shell: pwsh
-        run: |
-          git push origin "${{ env.TARGET_BRANCH }}"
+          $missing = @()
+          if ([string]::IsNullOrWhiteSpace("${{ secrets.CLIENT_ID }}")) { $missing += "CLIENT_ID" }
+          if ([string]::IsNullOrWhiteSpace("${{ secrets.CLIENT_SECRET }}")) { $missing += "CLIENT_SECRET" }
