@@ -1,39 +1,75 @@
-Power Platform Solution Export (Managed + Unmanaged)
-This repository uses a GitHub Actions workflow to export a Dataverse solution from a Power Platform environment, store it in source control, and keep both unmanaged and managed representations in a consistent, reviewable structure.
-The workflow is designed for repeatable ALM, PR-based reviews, and safe automation (including protection against corrupted ZIP artifacts).
+Power Platform Solution Export (Fed / DoD ALM Pattern)
+This repository implements a Federal / DoD–compliant Application Lifecycle Management (ALM) pattern for Microsoft Power Platform (Dataverse) solutions using GitHub Actions.
+It is designed for GCC, GCC High, and DoD (Flank Speed) environments where auditability, least‑privilege access, deterministic artifacts, and human review are mandatory.
 
-What This Workflow Does
-At a high level, the workflow:
+✅ What This Repository Does
+This repo contains a GitHub Actions workflow that:
 
-Exports the solution twice from Dataverse:
+Exports a Dataverse solution from a Power Platform environment
+Exports both:
 
-Unmanaged (for development / diff / source control)
-Managed (for deployment artifacts)
+Unmanaged (source-of-truth for development & review)
+Managed (deployment-aligned reference)
 
 
-Validates that the exported ZIPs are real, intact ZIP files
-Unpacks both ZIPs into readable folders
-Commits the unpacked source into a new Git branch
-Pushes the branch so it can be reviewed and merged via PR
+Validates exported ZIPs to prevent silent corruption
+Unpacks solutions into human‑readable XML source
+Commits changes to a new Git branch
+Requires a Pull Request for review before merge
 
-The workflow is run manually using workflow_dispatch.
+🚫 This repository does not deploy solutions
+All imports/deployments are intentionally out‑of‑scope and must be handled by separate, approved pipelines.
 
-When to Use This Workflow
-Use this workflow when you want to:
+Why This Pattern Exists (Fed / DoD Context)
+Federal and DoD environments require:
 
-Capture the current state of a Dataverse solution in Git
-Review solution changes via pull request
-Keep managed and unmanaged versions aligned
-Avoid committing opaque .zip files to source control
-Standardize ALM without Power Platform Pipelines
+✅ Human‑reviewable change history
+✅ Explicit change approval (PR‑based)
+✅ Separation of authoring and deployment
+✅ Deterministic, replayable artifacts
+✅ No opaque binaries as system of record
+✅ Least‑privilege service access
+✅ Traceability for audits (CM / RM controls)
+
+This pattern satisfies those requirements by treating Git as the system of record and Dataverse as the source of truth, while avoiding platform‑managed pipelines that obscure changes.
+
+Security & Compliance Characteristics
+✅ No Direct Deployment
+
+Workflow never imports solutions into any environment
+Eliminates accidental promotion risks
+
+✅ Least Privilege
+
+Uses a Service Principal (Application User) limited to solution export permissions
+No environment admin privileges required
+
+✅ Auditable Changes
+
+Every change results in:
+
+A Git commit
+A branch
+A Pull Request
+
+
+Full history is preserved and reviewable
+
+✅ Deterministic Artifacts
+
+Managed and unmanaged exports are produced from the same source snapshot
+Prevents version drift
+
+✅ Explicit Failure for Corrupt Exports
+
+ZIP validation (unzip -t) runs before unpack
+Prevents misleading Central Directory corrupt PAC CLI failures
+Common Fed issue when exports return HTML/JSON due to auth errors
 
 
 Prerequisites
 1. GitHub Environment
-The workflow expects a GitHub Environment named:
-MAIN
-
-This environment must contain the following secrets:
+A GitHub Environment named MAIN must exist and contain the following secrets:
 
 
 
@@ -55,21 +91,23 @@ This environment must contain the following secrets:
 
 
 
-Secret NameDescriptionCLIENT_IDEntra App (Service Principal) Client IDCLIENT_SECRETClient secret for the App RegistrationTENANT_IDEntra Tenant ID
-The service principal must be configured as an Application User in Dataverse with sufficient permissions to export solutions.
+Secret NameDescriptionCLIENT_IDEntra ID Application (Service Principal) Client IDCLIENT_SECRETClient secret for the App RegistrationTENANT_IDEntra ID Tenant ID
+Access to this environment should be restricted and audited.
 
-2. Solution Requirements
+2. Dataverse Configuration
 
-The solution must be an unmanaged solution in the source environment
-You must use the solution unique name, not the display name
+App Registration added to Dataverse as an Application User
+Assigned minimum required roles to export solutions
+Solution must be unmanaged in the source environment
+Workflow uses the solution UNIQUE NAME (not display name)
 
 
-How to Run the Workflow
+Running the Workflow
 
-Go to GitHub → Actions
+Navigate to GitHub → Actions
 Select Export Power Platform Solution (Managed + Unmanaged)
 Click Run workflow
-Provide the inputs:
+Provide inputs:
 
 Workflow Inputs
 
@@ -105,30 +143,19 @@ Workflow Inputs
 
 
 
-InputDescriptionenvironment_urlDataverse environment URL (e.g. https://org.crm.dynamics.com)solution_nameUnique name of the Dataverse solutionsource_branchBranch to start from (typically main)target_branchOptional; leave blank to auto‑generatecommit_messageCommit message for the exportuser_nameGit author name (default is GitHub Actions bot)
+InputDescriptionenvironment_urlDataverse environment URL (e.g. https://org.crm.dynamics.com)solution_nameUnique solution name in Dataversesource_branchBranch to start from (typically main)target_branchLeave blank to auto‑generatecommit_messageCommit message for audit traceabilityuser_nameGit author name (default: GitHub Actions bot)
 
 Branching Behavior
-If you leave target_branch blank, the workflow automatically creates a branch using:
+If target_branch is left blank, the workflow auto‑creates a branch:
 <solution-name>-YYYYMMDD-HHMM
 
 Example:
-coreforms-20260203-1512
+claims-intake-20260203-1512
 
-This makes it easy to identify what was exported and when.
+This aligns exports to change windows, tickets, or release cycles.
 
-What Gets Committed
-Only unpacked solution source is committed — ZIP files are not committed.
-The workflow explicitly:
-
-Exports ZIPs
-Validates them
-Unpacks them
-Copies unpacked source into /solutions
-Deletes ZIP artifacts before committing
-
-
-Directory Structure (After Merge to main)
-After the PR is merged, your repository will contain:
+Repository Directory Structure (After Merge)
+Once the PR is approved and merged into main, the repo will contain:
 solutions/
 └── <solution-name>/
     ├── unmanaged/
@@ -136,78 +163,28 @@ solutions/
     │   ├── Workflows/
     │   ├── OptionSets/
     │   ├── WebResources/
-    │   ├── CustomControls/
     │   └── solution.xml
-    │
     └── managed/
         ├── Entities/
         ├── Workflows/
         ├── OptionSets/
         ├── WebResources/
-        ├── CustomControls/
         └── solution.xml
 
-Key Points About This Structure
+Key Notes
+
+Unmanaged
+
+Primary source-of-truth
+Used for diffs, reviews, and merges
 
 
-unmanaged/
+Managed
 
-Primary source-of-truth for development
-Used for Git diffs, reviews, and merges
-What you expect to change frequently
-
+Mirrors managed solution state
+Used for validation and deployment alignment
 
 
-managed/
+ZIP files are NOT committed
 
-Mirrors the managed export
-Useful for validation, auditing, and promotion checks
-Typically changes only via releases
-
-
-
-Both folders are generated from the same Dataverse solution version
-
-
-
-Why ZIP Validation Exists
-Before unpacking, the workflow runs:
-Shellunzip -t <solution>.zip``Show more lines
-This prevents failures like:
-Central Directory corrupt
-
-Which usually means:
-
-The export returned HTML or JSON (401 / 403 / 404)
-The ZIP was truncated
-A downstream step would have failed with an unclear PAC error
-
-Instead, the workflow fails early with a clear signal.
-
-What This Workflow Does Not Do
-
-❌ It does not import solutions
-❌ It does not deploy to downstream environments
-❌ It does not use Power Platform Pipelines
-❌ It does not commit ZIP files
-
-This workflow is export + source control only by design.
-
-Typical ALM Flow Using This Pattern
-
-Developer modifies solution in Dataverse
-Run this workflow
-Open PR from auto-generated branch → main
-Review solution diffs
-Merge to main
-Downstream pipelines (or manual steps) deploy from source if needed
-
-
-Common Extensions
-This workflow is often extended to:
-
-Automatically open a Pull Request
-Trigger validation (Solution Checker)
-Feed managed ZIPs into release pipelines
-Support multiple clouds (Commercial / GCC / GCC High / DoD)
-Enforce branch naming or review policies
+Treated as transient build artifacts only
