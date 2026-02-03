@@ -1,16 +1,16 @@
 name: Pull from Power Platform
-run-name: Getting ${{ github.event.inputs.solution_name }} from pipelines host environment and committing
+run-name: Pull from Power Platform ${{ github.event.inputs.solution_name }}
 
 on:
   workflow_dispatch:
     inputs:
       artifact_url:
-        description: "The URL of the Dataverse record ID for the artifact created by the pipelines"
+        description: "The url of the Dataverse record ID for the artifact created by the pipelines (Example: https://[your-env].crm.dynamics.com/api/data/v9.0/deploymentartifacts([id])/artifactfile/$value)"
         required: true
       solution_name:
         description: "Name of the Solution in Dataverse environment"
         required: true
-      user_name: 
+      user_name:
         description: "User name for the commit"
         required: true
       source_branch:
@@ -28,14 +28,8 @@ permissions:
 
 jobs:
   export-unpack-commit:
-    runs-on: windows-latest
-
+    runs-on: ubuntu-latest
     environment: MAIN
-
-    env:
-      CLIENT_ID: ${{ secrets.CLIENT_ID }}
-      TENANT_ID: ${{ secrets.TENANT_ID }}
-      CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}    
 
     steps:
       - uses: actions/checkout@v3
@@ -46,14 +40,14 @@ jobs:
         shell: pwsh
         run: |
           if ('${{ github.event.inputs.target_branch }}' -ne '') {
-            git checkout -b ${{ github.event.inputs.target_branch }} ${{ github.event.inputs.source_branch }}
+            git checkout -b '${{ github.event.inputs.target_branch }}' '${{ github.event.inputs.source_branch }}'
           }
 
       - name: Download solution from artifact
         env:
-          CLIENT_ID: $env:CLIENT_ID
-          TENANT_ID: $env.TENANT_ID }}
-          CLIENT_SECRET: $env:CLIENT_SECRET
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          TENANT_ID: ${{ secrets.TENANT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
         shell: pwsh
         run: |
           $aadHost = "login.microsoftonline.com"
@@ -62,48 +56,46 @@ jobs:
           $dataverseHost = $url.Split("://", $options)[1].Split("/")[0]
 
           $body = @{
-            client_id = $env:CLIENT_ID
+            client_id     = $env:CLIENT_ID
             client_secret = $env:CLIENT_SECRET
-            grant_type = "client_credentials"
-            scope = "https://$dataverseHost/.default"
+            grant_type    = "client_credentials"
+            scope         = "https://$dataverseHost/.default"
           }
-          $OAuthReq = Invoke-RestMethod -Method Post -Uri "https://$aadHost/$env:TENANT_ID/oauth2/v2.0/token" -Body $body
+
+          $OAuthReq = Invoke-RestMethod -Method Post -Uri "https://$aadHost/$($env:TENANT_ID)/oauth2/v2.0/token" -Body $body
           $spnToken = $OAuthReq.access_token
+
           $headers = @{
-            "Authorization" = "Bearer $spnToken"
-            "Content-Type" = "application/json"
+            Authorization = "Bearer $spnToken"
           }
 
-          $response = Invoke-RestMethod "${{ github.event.inputs.artifact_url }}" -Method 'GET' -Headers $headers
-          $bytes = [Convert]::FromBase64String($response.value)
-          [IO.File]::WriteAllBytes("${{ github.event.inputs.solution_name }}_managed.zip", $bytes)
-
-          $unmanaged_artifact_url = "${{ github.event.inputs.artifact_url }}"
-          $response = Invoke-RestMethod "$unmanaged_artifact_url" -Method 'GET' -Headers $headers
-          $bytes = [Convert]::FromBase64String($response.value)
-          [IO.File]::WriteAllBytes("${{ github.event.inputs.solution_name }}.zip", $bytes)
-
+          # Artifact endpoint ends with /$value, so download to file directly
+          $outFile = "${{ github.event.inputs.solution_name }}.zip"
+          Invoke-WebRequest -Uri "${{ github.event.inputs.artifact_url }}" -Headers $headers -OutFile $outFile
 
       - name: Unpack solution
-        uses: microsoft/powerplatform-actions/unpack-solution@v0.2.0
-        # If the above fails, you can use a local copy:
-        # uses: ./github/actions/unpack-solution
+        uses: microsoft/powerplatform-actions/unpack-solution@v0
         with:
           solution-file: "${{ github.event.inputs.solution_name }}.zip"
           solution-folder: "${{ github.event.repository.name }}"
-          solution-type: 'Both'
+          solution-type: "Unmanaged"
           overwrite-files: true
 
       - name: Commit changes
         shell: pwsh
         run: |
           Remove-Item -Path "${{ github.event.inputs.solution_name }}.zip" -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "${{ github.event.inputs.solution_name }}_managed.zip" -Force -ErrorAction SilentlyContinue
-          git config user.name ${{ github.event.inputs.user_name }}
+          git config user.name "${{ github.event.inputs.user_name }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+
           git pull
           git add --all
 
-      - name: Push new branch to GitHub
+          git commit -m "${{ github.event.inputs.commit_message }}" || echo "No changes to commit."
+
+      - name: Push branch to GitHub
         shell: pwsh
         run: |
-          git push origin ${{ github.event.inputs.target_branch }}          
+          $branch = '${{ github.event.inputs.target_branch }}'
+          if ([string]::IsNullOrWhiteSpace($branch)) { $branch = '${{ github.event.inputs.source_branch }}' }
+          git push origin $branch
