@@ -26,16 +26,16 @@ on:
 permissions:
   contents: write
 
-environment: MAIN
-
-env:
-  CLIENT_ID: ${{ secrets.CLIENT_ID }}
-  TENANT_ID: ${{ secrets.TENANT_ID }}
-  CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
-
 jobs:
   export-unpack-commit:
     runs-on: windows-latest
+
+    environment: MAIN
+
+    env:
+      CLIENT_ID: ${{ secrets.CLIENT_ID }}
+      TENANT_ID: ${{ secrets.TENANT_ID }}
+      CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}    
 
     steps:
       - uses: actions/checkout@v3
@@ -51,9 +51,9 @@ jobs:
 
       - name: Download solution from artifact
         env:
-          CLIENT_ID: "70dbbbb5-71bd-45d5-a23b-f23149d30c73"
-          TENANT_ID: "c0daba30-fba7-4669-a2fc-36142728b7e9"
-          CLIENT_SECRET: "E0V8Q~DE~pv3cYS478qnt4RYBL6ogHO_QVRTpco3"
+          CLIENT_ID: $env:CLIENT_ID
+          TENANT_ID: $env.TENANT_ID }}
+          CLIENT_SECRET: $env:CLIENT_SECRET
         shell: pwsh
         run: |
           $aadHost = "login.microsoftonline.com"
