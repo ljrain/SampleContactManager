@@ -1,16 +1,13 @@
-# GitHub Actions workflow to export a Power Platform solution
-# - Exports BOTH Unmanaged and Managed solution ZIPs
-# - Validates ZIP integrity to avoid "Central Directory corrupt" errors
-# - Unpacks both versions into source-controlled folders
-# - Commits and pushes changes to a new auto-prefixed branch
+# Export a Dataverse solution (Unmanaged + Managed), validate ZIPs, unpack to repo, and push to a versioned branch.
+# Fed/DoD-friendly: no deployments/imports; Git PR is the approval gate.
 
-name: Export Power Platform Solution (Managed + Unmanaged)
+name: Export Power Platform Solution (Dual Export, Versioned)
 
 on:
   workflow_dispatch:
     inputs:
       environment_url:
-        description: "Dataverse environment URL (e.g. https://org.crm.dynamics.com)"
+        description: "Dataverse environment URL (e.g., https://org.crm.dynamics.com)"
         required: true
         type: string
       solution_name:
@@ -23,14 +20,14 @@ on:
         default: "main"
         type: string
       target_branch:
-        description: "Target branch (leave blank to auto-generate)"
+        description: "Optional target branch. If blank, auto-generates <solution>-<version>-<YYYYMMDD-HHMM>"
         required: false
         default: ""
         type: string
       commit_message:
-        description: "Git commit message"
+        description: "Git commit message (version will be appended automatically)"
         required: true
-        default: "Export Power Platform solution (managed + unmanaged)"
+        default: "Export Power Platform solution"
         type: string
       user_name:
         description: "Git commit username"
@@ -44,35 +41,18 @@ permissions:
 jobs:
   export-unpack-commit:
     runs-on: ubuntu-latest
-    environment: MAIN  # GitHub Environment containing CLIENT_ID / CLIENT_SECRET / TENANT_ID
+
+    # IMPORTANT: Secrets are read from GitHub Environment named MAIN.
+    environment: MAIN
 
     steps:
-      # 1. Checkout the source branch
+      # 1) Checkout the repository at the specified source branch
       - name: Checkout source branch
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_branch }}
 
-      # 2. Resolve target branch name (auto-generate if not provided)
-      - name: Resolve target branch
-        shell: bash
-        run: |
-          set -euo pipefail
-          SOL="${{ inputs.solution_name }}"
-          SRC="${{ inputs.source_branch }}"
-          IN_TARGET="${{ inputs.target_branch }}"
-          TS="$(date +'%Y%m%d-%H%M')"
-          SAFE_SOL="$(echo "$SOL" | sed -E 's/[^a-zA-Z0-9_-]+/-/g' | sed -E 's/^-+|-+$//g')"
-          if [[ -z "$IN_TARGET" ]]; then
-            TARGET="$SAFE_SOL-$TS"
-          else
-            TARGET="$IN_TARGET"
-          fi
-          echo "SOURCE_BRANCH=$SRC" >> "$GITHUB_ENV"
-          echo "TARGET_BRANCH=$TARGET" >> "$GITHUB_ENV"
-          git checkout -b "$TARGET"
-
-      # 3. Validate required secrets exist (values are NOT printed)
+      # 2) Validate required secrets exist (values are NOT printed)
       - name: Validate secrets
         shell: bash
         env:
@@ -90,86 +70,156 @@ jobs:
             exit 1
           fi
 
-      # 4. Install Power Platform CLI tools (recommended)
+      # 3) Install Power Platform tooling for the runner
       - name: Install Power Platform tools
         uses: microsoft/powerplatform-actions/actions-install@v1
 
-      # 5. Export UNMANAGED solution ZIP
-      - name: Export unmanaged solution
+      # 4) Get the solution version from Dataverse (so version is available BEFORE export/download filenames)
+      - name: Get solution version (Dataverse Web API)
+        shell: bash
+        env:
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          TENANT_ID: ${{ secrets.TENANT_ID }}
+        run: |
+          set -euo pipefail
+
+          # Derive Dataverse host from environment_url
+          ENV_URL="${{ inputs.environment_url }}"
+          DATAVERSE_HOST=$(echo "$ENV_URL" | awk -F[/:] '{print $4}')
+
+          # Get Entra token for Dataverse
+          TOKEN=$(curl -sS -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "client_id=${CLIENT_ID}&client_secret=${CLIENT_SECRET}&grant_type=client_credentials&scope=https%3A%2F%2F${DATAVERSE_HOST}%2F.default" \
+            | python -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+          # Query Solutions table for this solution uniquename
+          SOL_NAME="${{ inputs.solution_name }}"
+          RESP=$(curl -sS -X GET "${ENV_URL%/}/api/data/v9.0/solutions?$select=uniquename,version&$filter=uniquename%20eq%20'${SOL_NAME}'" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Accept: application/json")
+
+          VERSION=$(echo "$RESP" | python -c "import sys,json; d=json.load(sys.stdin); v=d.get('value',[]); print(v[0]['version'] if v else '')")
+
+          if [[ -z "$VERSION" ]]; then
+            echo "Unable to retrieve solution version for ${SOL_NAME}. Response:"
+            echo "$RESP"
+            exit 1
+          fi
+
+          # Persist the version for later steps
+          echo "SOLUTION_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          # Also create a filename-safe version (dots -> underscores)
+          SAFE_VER=$(echo "$VERSION" | tr '.' '_')
+          echo "SOLUTION_VERSION_SAFE=$SAFE_VER" >> "$GITHUB_ENV"
+
+          echo "Resolved solution version: $VERSION"
+
+      # 5) Resolve branch name (include version in auto-generated branch) and checkout it
+      - name: Resolve target branch (versioned)
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOL="${{ inputs.solution_name }}"
+          IN_TARGET="${{ inputs.target_branch }}"
+          TS="$(date +'%Y%m%d-%H%M')"
+          SAFE_SOL=$(echo "$SOL" | sed -E 's/[^a-zA-Z0-9_-]+/-/g' | sed -E 's/^-+|-+$//g')
+
+          if [[ -z "$IN_TARGET" ]]; then
+            TARGET="${SAFE_SOL}-${SOLUTION_VERSION_SAFE}-${TS}"
+          else
+            TARGET="$IN_TARGET"
+          fi
+
+          echo "TARGET_BRANCH=$TARGET" >> "$GITHUB_ENV"
+          git checkout -b "$TARGET"
+          echo "Using branch: $TARGET"
+
+      # 6) Ensure working directories exist and are clean
+      - name: Prepare folders (clean)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/exported
+
+          # Remove any prior unpacked output so deletions are reflected in Git
+          rm -rf "solutions/${{ inputs.solution_name }}" || true
+          mkdir -p "solutions/${{ inputs.solution_name }}"
+
+      # 7) Export UNMANAGED solution ZIP with version in filename
+      - name: Export UNMANAGED solution
         uses: microsoft/powerplatform-actions/export-solution@v1
         with:
           environment-url: ${{ inputs.environment_url }}
           app-id: ${{ secrets.CLIENT_ID }}
           client-secret: ${{ secrets.CLIENT_SECRET }}
           tenant-id: ${{ secrets.TENANT_ID }}
-          solution-name: ${{ inputs.solution_name }}
-          solution-output-file: out/exported/${{ inputs.solution_name }}.zip
           cloud: UsGov
+          solution-name: ${{ inputs.solution_name }}
+          solution-output-file: out/exported/${{ inputs.solution_name }}_${{ env.SOLUTION_VERSION_SAFE }}.zip
+          managed: false
           overwrite: true
 
-      # 6. Export MANAGED solution ZIP
-      - name: Export managed solution
+      # 8) Export MANAGED solution ZIP with version in filename
+      - name: Export MANAGED solution
         uses: microsoft/powerplatform-actions/export-solution@v1
         with:
           environment-url: ${{ inputs.environment_url }}
           app-id: ${{ secrets.CLIENT_ID }}
           client-secret: ${{ secrets.CLIENT_SECRET }}
           tenant-id: ${{ secrets.TENANT_ID }}
+          cloud: UsGov
           solution-name: ${{ inputs.solution_name }}
-          solution-output-file: out/exported/${{ inputs.solution_name }}_managed.zip
+          solution-output-file: out/exported/${{ inputs.solution_name }}_${{ env.SOLUTION_VERSION_SAFE }}_managed.zip
           managed: true
-          cloud: UsGov
           overwrite: true
 
-      # 7. ZIP integrity validation (prevents Central Directory corrupt errors)
+      # 9) Validate ZIP integrity BEFORE unpack (catches HTML/JSON/partial files early)
       - name: Validate exported ZIPs
         shell: bash
         run: |
           set -euo pipefail
           ls -al out/exported
-          unzip -t "out/exported/${{ inputs.solution_name }}.zip" > /dev/null
-          unzip -t "out/exported/${{ inputs.solution_name }}_managed.zip" > /dev/null
+          unzip -t "out/exported/${{ inputs.solution_name }}_${SOLUTION_VERSION_SAFE}.zip" > /dev/null
+          unzip -t "out/exported/${{ inputs.solution_name }}_${SOLUTION_VERSION_SAFE}_managed.zip" > /dev/null
           echo "ZIP integrity validated"
 
-      # 8. Unpack UNMANAGED solution
-      - name: Unpack unmanaged solution
+      # 10) Unpack UNMANAGED ZIP directly into repo folder
+      - name: Unpack UNMANAGED into repo
         uses: microsoft/powerplatform-actions/unpack-solution@v1
         with:
-          solution-file: out/exported/${{ inputs.solution_name }}.zip
-          solution-folder: out/solutions/${{ inputs.solution_name }}/unmanaged
+          solution-file: out/exported/${{ inputs.solution_name }}_${{ env.SOLUTION_VERSION_SAFE }}.zip
+          solution-folder: solutions/${{ inputs.solution_name }}/unmanaged
           solution-type: Unmanaged
           overwrite-files: true
+          process-canvas-apps: false
 
-      # 9. Unpack MANAGED solution
-      - name: Unpack managed solution
+      # 11) Unpack MANAGED ZIP directly into repo folder
+      - name: Unpack MANAGED into repo
         uses: microsoft/powerplatform-actions/unpack-solution@v1
         with:
-          solution-file: out/exported/${{ inputs.solution_name }}_managed.zip
-          solution-folder: out/solutions/${{ inputs.solution_name }}/managed
+          solution-file: out/exported/${{ inputs.solution_name }}_${{ env.SOLUTION_VERSION_SAFE }}_managed.zip
+          solution-folder: solutions/${{ inputs.solution_name }}/managed
           solution-type: Managed
           overwrite-files: true
+          process-canvas-apps: false
 
-      # 10. Copy unpacked solutions into repo-controlled folders
-      - name: Copy unpacked solutions into repo
-        shell: bash
-        run: |
-          set -euo pipefail
-          SOL="${{ inputs.solution_name }}"
-          rm -rf "solutions/$SOL"
-          mkdir -p "solutions/$SOL"
-          cp -R "out/solutions/$SOL"/* "solutions/$SOL/"
-
-      # 11. Commit changes
+      # 12) Commit changes (includes version in message for audit traceability)
       - name: Commit changes
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "${{ inputs.user_name }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
-          git add .
-          git commit -m "${{ inputs.commit_message }}" || echo "No changes to commit"
 
-      # 12. Push branch
+          git add -A
+
+          MSG="${{ inputs.commit_message }} (v${SOLUTION_VERSION})"
+          git commit -m "$MSG" || echo "No changes to commit"
+
+      # 13) Push the versioned branch
       - name: Push branch
         shell: bash
         run: |
