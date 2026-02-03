@@ -1,0 +1,102 @@
+name: Download, unpack and commit the solution to git
+run-name: Getting ${{ github.event.inputs.solution_name }} from pipelines host environment and committing
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_url:
+        description: "The URL of the Dataverse record ID for the artifact created by the pipelines"
+        required: true
+      solution_name:
+        description: "Name of the Solution in Dataverse environment"
+        required: true
+      user_name: 
+        description: "User name for the commit"
+        required: true
+      source_branch:
+        description: "Branch for the solution commit"
+        required: true
+      target_branch:
+        description: "Branch to create for the solution commit"
+        required: false
+      commit_message:
+        description: "Message to provide for the commit"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  export-unpack-commit:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.inputs.source_branch }}
+
+      - name: Create new branch if specified
+        shell: pwsh
+        run: |
+          if ('${{ github.event.inputs.target_branch }}' -ne '') {
+            git checkout -b ${{ github.event.inputs.target_branch }} ${{ github.event.inputs.source_branch }}
+          }
+
+      - name: Download solution from artifact
+        env:
+          CLIENT_ID: "70dbbbb5-71bd-45d5-a23b-f23149d30c73"
+          TENANT_ID: "c0daba30-fba7-4669-a2fc-36142728b7e9"
+          CLIENT_SECRET: "E0V8Q~DE~pv3cYS478qnt4RYBL6ogHO_QVRTpco3"
+        shell: pwsh
+        run: |
+          $aadHost = "login.microsoftonline.com"
+          $url = "${{ github.event.inputs.artifact_url }}"
+          $options = [System.StringSplitOptions]::RemoveEmptyEntries
+          $dataverseHost = $url.Split("://", $options)[1].Split("/")[0]
+
+          $body = @{
+            client_id = $env:CLIENT_ID
+            client_secret = $env:CLIENT_SECRET
+            grant_type = "client_credentials"
+            scope = "https://$dataverseHost/.default"
+          }
+          $OAuthReq = Invoke-RestMethod -Method Post -Uri "https://$aadHost/$env:TENANT_ID/oauth2/v2.0/token" -Body $body
+          $spnToken = $OAuthReq.access_token
+          $headers = @{
+            "Authorization" = "Bearer $spnToken"
+            "Content-Type" = "application/json"
+          }
+
+          $response = Invoke-RestMethod "${{ github.event.inputs.artifact_url }}" -Method 'GET' -Headers $headers
+          $bytes = [Convert]::FromBase64String($response.value)
+          [IO.File]::WriteAllBytes("${{ github.event.inputs.solution_name }}_managed.zip", $bytes)
+
+          $unmanaged_artifact_url = "${{ github.event.inputs.artifact_url }}"
+          $response = Invoke-RestMethod "$unmanaged_artifact_url" -Method 'GET' -Headers $headers
+          $bytes = [Convert]::FromBase64String($response.value)
+          [IO.File]::WriteAllBytes("${{ github.event.inputs.solution_name }}.zip", $bytes)
+
+
+      - name: Unpack solution
+        uses: microsoft/powerplatform-actions/unpack-solution@v0.2.0
+        # If the above fails, you can use a local copy:
+        # uses: ./github/actions/unpack-solution
+        with:
+          solution-file: "${{ github.event.inputs.solution_name }}.zip"
+          solution-folder: "${{ github.event.repository.name }}"
+          solution-type: 'Both'
+          overwrite-files: true
+
+      - name: Commit changes
+        shell: pwsh
+        run: |
+          Remove-Item -Path "${{ github.event.inputs.solution_name }}.zip" -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "${{ github.event.inputs.solution_name }}_managed.zip" -Force -ErrorAction SilentlyContinue
+          git config user.name ${{ github.event.inputs.user_name }}
+          git pull
+          git add --all
+
+      - name: Push new branch to GitHub
+        shell: pwsh
+        run: |
+          git push origin ${{ github.event.inputs.target_branch }}          
