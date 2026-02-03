@@ -1,5 +1,5 @@
 # Export a Dataverse solution (Unmanaged + Managed), validate ZIPs, unpack to repo, and push to a versioned branch.
-# Fed/DoD-friendly: no deployments/imports; Git PR is the approval gate.
+# Fed/DoD-friendly: no deployments/imports; PR is the approval gate.
 
 name: Export Power Platform Solution (Dual Export, Versioned)
 
@@ -74,7 +74,8 @@ jobs:
       - name: Install Power Platform tools
         uses: microsoft/powerplatform-actions/actions-install@v1
 
-      # 4) Get the solution version from Dataverse (so version is available BEFORE export/download filenames)
+      # 4) Get the solution version from Dataverse (before export, so the version can be used in filenames/branch)
+      #    NOTE: the $ characters in OData params are escaped (\$select, \$filter) to avoid bash treating them as vars.
       - name: Get solution version (Dataverse Web API)
         shell: bash
         env:
@@ -84,37 +85,44 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Derive Dataverse host from environment_url
           ENV_URL="${{ inputs.environment_url }}"
-          DATAVERSE_HOST=$(echo "$ENV_URL" | awk -F[/:] '{print $4}')
+          SOL_NAME="${{ inputs.solution_name }}"
+
+          # Derive the Dataverse host for the token scope (e.g. org.crm9.dynamics.com)
+          DATAVERSE_HOST=$(python - <<'PY'
+import os
+from urllib.parse import urlparse
+u=os.environ['ENV_URL']
+print(urlparse(u).netloc)
+PY
+)
 
           # Get Entra token for Dataverse
           TOKEN=$(curl -sS -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token" \
             -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "client_id=${CLIENT_ID}&client_secret=${CLIENT_SECRET}&grant_type=client_credentials&scope=https%3A%2F%2F${DATAVERSE_HOST}%2F.default" \
+            --data-urlencode "client_id=${CLIENT_ID}" \
+            --data-urlencode "client_secret=${CLIENT_SECRET}" \
+            --data-urlencode "grant_type=client_credentials" \
+            --data-urlencode "scope=https://${DATAVERSE_HOST}/.default" \
             | python -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 
-          # Query Solutions table for this solution uniquename
-          SOL_NAME="${{ inputs.solution_name }}"
-          RESP=$(curl -sS -X GET "${ENV_URL%/}/api/data/v9.0/solutions?$select=uniquename,version&$filter=uniquename%20eq%20'${SOL_NAME}'" \
+          # Query solutions for version by uniquename
+          RESP=$(curl -sS --get "${ENV_URL%/}/api/data/v9.0/solutions" \
+            --data-urlencode "\\$select=uniquename,version" \
+            --data-urlencode "\\$filter=uniquename eq '${SOL_NAME}'" \
             -H "Authorization: Bearer ${TOKEN}" \
             -H "Accept: application/json")
 
-          VERSION=$(echo "$RESP" | python -c "import sys,json; d=json.load(sys.stdin); v=d.get('value',[]); print(v[0]['version'] if v else '')")
+          VERSION=$(echo "$RESP" | python -c "import sys,json; d=json.load(sys.stdin); v=d.get('value',[]); print(v[0].get('version','') if v else '')")
 
           if [[ -z "$VERSION" ]]; then
-            echo "Unable to retrieve solution version for ${SOL_NAME}. Response:"
-            echo "$RESP"
+            echo "Unable to retrieve solution version for ${SOL_NAME}. Response:" >&2
+            echo "$RESP" >&2
             exit 1
           fi
 
-          # Persist the version for later steps
           echo "SOLUTION_VERSION=$VERSION" >> "$GITHUB_ENV"
-
-          # Also create a filename-safe version (dots -> underscores)
-          SAFE_VER=$(echo "$VERSION" | tr '.' '_')
-          echo "SOLUTION_VERSION_SAFE=$SAFE_VER" >> "$GITHUB_ENV"
-
+          echo "SOLUTION_VERSION_SAFE=$(echo "$VERSION" | tr '.' '_')" >> "$GITHUB_ENV"
           echo "Resolved solution version: $VERSION"
 
       # 5) Resolve branch name (include version in auto-generated branch) and checkout it
