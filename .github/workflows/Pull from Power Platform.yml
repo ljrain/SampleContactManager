@@ -1,30 +1,37 @@
-name: Export solution from Power Platform (direct)
+name: Export solution from Power Platform (dual export)
+
+run-name: Export ${{ inputs.solution_name }} (managed + unmanaged)
 
 on:
   workflow_dispatch:
     inputs:
       environment_url:
-        description: Dataverse environment URL (e.g. https://org.crm9.dynamics.com)
+        description: "Dataverse environment URL (e.g., https://yourenv.crm9.dynamics.com)"
         required: true
         type: string
       solution_name:
-        description: Solution unique name
+        description: "Solution unique name in Dataverse"
         required: true
         type: string
       source_branch:
-        description: Branch to start from
+        description: "Branch to start from"
         required: true
         default: main
         type: string
+      target_branch:
+        description: "Branch to commit into (optional). Leave blank to auto-generate <solution>-yyyyMMdd-HHmm"
+        required: false
+        default: ""
+        type: string
       commit_message:
-        description: Commit message
+        description: "Commit message"
         required: true
-        default: Export solution from Power Platform
+        default: "Export solution from Power Platform (dual export)"
         type: string
       user_name:
-        description: Git commit username
+        description: "Git commit username"
         required: true
-        default: github-actions[bot]
+        default: "github-actions[bot]"
         type: string
 
 permissions:
@@ -33,33 +40,45 @@ permissions:
 jobs:
   export-unpack-commit:
     runs-on: windows-latest
+
+    # IMPORTANT: This must match your Environment name exactly so MAIN env secrets are injected
     environment: MAIN
 
     steps:
       - name: Checkout source branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.source_branch }}
+          ref: ${{ inputs.source_branch }}
 
-      - name: Resolve branches (auto-prefix)
+      - name: Resolve target branch (auto-prefix with solution name)
         shell: pwsh
         run: |
-          $source = '${{ github.event.inputs.source_branch }}'
-          if ([string]::IsNullOrWhiteSpace($source)) {
-            $source = 'main'
+          $source = "${{ inputs.source_branch }}"
+          if ([string]::IsNullOrWhiteSpace($source)) { $source = "main" }
+
+          $targetInput = "${{ inputs.target_branch }}"
+          $solution = "${{ inputs.solution_name }}"
+          $timestamp = Get-Date -Format "yyyyMMdd-HHmm"
+          $safeSolution = ($solution -replace '[^a-zA-Z0-9._-]', '-') .Trim('-')
+
+          if ([string]::IsNullOrWhiteSpace($targetInput)) {
+            $target = "$safeSolution-$timestamp"
+          } else {
+            $target = $targetInput
           }
 
-          $solution = '${{ github.event.inputs.solution_name }}'
-          $stamp = Get-Date -Format 'yyyyMMdd-HHmm'
-          $safe = ($solution -replace '[^a-zA-Z0-9._-]', '-').Trim('-')
-          $target = "$safe-$stamp"
+          "SOURCE_BRANCH=$source" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TARGET_BRANCH=$target" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-          "SOURCE_BRANCH=$source" | Out-File $env:GITHUB_ENV -Append
-          "TARGET_BRANCH=$target" | Out-File $env:GITHUB_ENV -Append
+          Write-Host "SOURCE_BRANCH=$source"
+          Write-Host "TARGET_BRANCH=$target"
 
-          git checkout -b $target
+      - name: Create and switch to target branch
+        shell: pwsh
+        run: |
+          git checkout -b "$env:TARGET_BRANCH"
 
-      - name: Validate environment secrets
+      - name: Validate environment secrets injected (no values printed)
         shell: pwsh
         env:
           CLIENT_ID: ${{ secrets.CLIENT_ID }}
@@ -67,52 +86,105 @@ jobs:
           TENANT_ID: ${{ secrets.TENANT_ID }}
         run: |
           $missing = @()
-          if ([string]::IsNullOrWhiteSpace($env:CLIENT_ID)) { $missing += 'CLIENT_ID' }
-          if ([string]::IsNullOrWhiteSpace($env:CLIENT_SECRET)) { $missing += 'CLIENT_SECRET' }
-          if ([string]::IsNullOrWhiteSpace($env:TENANT_ID)) { $missing += 'TENANT_ID' }
-
+          if ([string]::IsNullOrWhiteSpace($env:CLIENT_ID)) { $missing += "CLIENT_ID" }
+          if ([string]::IsNullOrWhiteSpace($env:CLIENT_SECRET)) { $missing += "CLIENT_SECRET" }
+          if ([string]::IsNullOrWhiteSpace($env:TENANT_ID)) { $missing += "TENANT_ID" }
           if ($missing.Count -gt 0) {
-            throw "Missing environment secrets: $($missing -join ', ')"
+            throw ("Missing environment secrets: " + ($missing -join ", "))
           }
+          Write-Host "Environment secrets injected successfully."
+
+      - name: Install Power Platform tools
+        uses: microsoft/powerplatform-actions/actions-install@v1
+        # Recommended to install tools before other Power Platform actions [4](https://learn.microsoft.com/en-us/power-platform/alm/devops-github-available-actions)
 
       - name: WhoAmI (auth preflight)
         uses: microsoft/powerplatform-actions/who-am-i@v0
         with:
-          environment-url: ${{ github.event.inputs.environment_url }}
+          environment-url: ${{ inputs.environment_url }}
           app-id: ${{ secrets.CLIENT_ID }}
           client-secret: ${{ secrets.CLIENT_SECRET }}
           tenant-id: ${{ secrets.TENANT_ID }}
           cloud: UsGov
 
-      - name: Export solution
+      # ---- EXPORT BOTH ----
+      - name: Export UNMANAGED solution
         uses: microsoft/powerplatform-actions/export-solution@v0
         with:
-          environment-url: ${{ github.event.inputs.environment_url }}
+          environment-url: ${{ inputs.environment_url }}
           app-id: ${{ secrets.CLIENT_ID }}
           client-secret: ${{ secrets.CLIENT_SECRET }}
           tenant-id: ${{ secrets.TENANT_ID }}
           cloud: UsGov
-          solution-name: ${{ github.event.inputs.solution_name }}
-          solution-output-file: out/exported.zip
-          solution-type: Unmanaged
+          solution-name: ${{ inputs.solution_name }}
+          solution-output-file: out/exported/${{ inputs.solution_name }}.zip
 
-      - name: Unpack solution
+      - name: Export MANAGED solution
+        uses: microsoft/powerplatform-actions/export-solution@v0
+        with:
+          environment-url: ${{ inputs.environment_url }}
+          app-id: ${{ secrets.CLIENT_ID }}
+          client-secret: ${{ secrets.CLIENT_SECRET }}
+          tenant-id: ${{ secrets.TENANT_ID }}
+          cloud: UsGov
+          solution-name: ${{ inputs.solution_name }}
+          solution-output-file: out/exported/${{ inputs.solution_name }}_managed.zip
+          managed: true
+          # managed: true is shown in Microsoft lab guidance [1](https://dev.to/mrmike/github-action-handling-input-default-value-5f2g)[2](https://microsoft.github.io/Low-Code/docs/prodev-6/step-4/)
+
+      # ---- UNPACK BOTH ----
+      - name: Unpack UNMANAGED solution
         uses: microsoft/powerplatform-actions/unpack-solution@v0
         with:
-          solution-file: out/exported.zip
-          solution-folder: solutions/${{ github.event.inputs.solution_name }}
+          solution-file: out/exported/${{ inputs.solution_name }}.zip
+          solution-folder: out/solutions/${{ inputs.solution_name }}/unmanaged
           solution-type: Unmanaged
           overwrite-files: true
+          # solution-type supports Unmanaged/Managed/Both [3](https://learn.microsoft.com/en-us/power-platform/developer/pipelines/table-reference)
+
+      - name: Unpack MANAGED solution
+        uses: microsoft/powerplatform-actions/unpack-solution@v0
+        with:
+          solution-file: out/exported/${{ inputs.solution_name }}_managed.zip
+          solution-folder: out/solutions/${{ inputs.solution_name }}/managed
+          solution-type: Managed
+          overwrite-files: true
+          # solution-type supports Unmanaged/Managed/Both [3](https://learn.microsoft.com/en-us/power-platform/developer/pipelines/table-reference)
+
+      # ---- COPY INTO REPO PATHS FOR CHECK-IN ----
+      - name: Copy unpacked outputs into repo folders
+        shell: pwsh
+        run: |
+          $sol = "${{ inputs.solution_name }}"
+          $repoRoot = (Get-Location).Path
+
+          $destUnmanaged = Join-Path $repoRoot ("solutions\" + $sol + "\unmanaged")
+          $destManaged   = Join-Path $repoRoot ("solutions\" + $sol + "\managed")
+
+          if (Test-Path $destUnmanaged) { Remove-Item -Recurse -Force $destUnmanaged }
+          if (Test-Path $destManaged)   { Remove-Item -Recurse -Force $destManaged }
+
+          New-Item -ItemType Directory -Force -Path $destUnmanaged | Out-Null
+          New-Item -ItemType Directory -Force -Path $destManaged   | Out-Null
+
+          Copy-Item -Recurse -Force "out\solutions\$sol\unmanaged\*" $destUnmanaged
+          Copy-Item -Recurse -Force "out\solutions\$sol\managed\*"   $destManaged
+
+      - name: Cleanup exported zip files
+        shell: pwsh
+        run: |
+          Remove-Item -Force -ErrorAction SilentlyContinue "out\exported\${{ inputs.solution_name }}.zip"
+          Remove-Item -Force -ErrorAction SilentlyContinue "out\exported\${{ inputs.solution_name }}_managed.zip"
 
       - name: Commit changes
         shell: pwsh
         run: |
-          git config user.name "${{ github.event.inputs.user_name }}"
+          git config user.name "${{ inputs.user_name }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
-          git add .
-          git commit -m "${{ github.event.inputs.commit_message }}" --allow-empty
+          git add --all
+          git commit -m "${{ inputs.commit_message }}" --allow-empty
 
       - name: Push branch
         shell: pwsh
         run: |
-          git push origin $env:TARGET_BRANCH
+          git push origin "$env:TARGET_BRANCH"
