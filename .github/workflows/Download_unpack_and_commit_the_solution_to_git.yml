@@ -1,7 +1,8 @@
 # Export a Dataverse solution (Unmanaged + Managed), validate ZIPs, unpack to repo, and push to a versioned branch.
 # Fed/DoD-friendly: no deployments/imports; PR is the approval gate.
+# Branch naming is FIXED to: <solution-name>-<version> (no override option)
 
-name: Export Power Platform Solution (Dual Export, Versioned Branch Suffix)
+name: Export Power Platform Solution (Dual Export, Fixed Version Branch)
 
 on:
   workflow_dispatch:
@@ -18,11 +19,6 @@ on:
         description: "Branch to start from"
         required: true
         default: "main"
-        type: string
-      target_branch:
-        description: "Optional target branch. If blank, auto-generates <solution>-<YYYYMMDD-HHMM>-<version>"
-        required: false
-        default: ""
         type: string
       commit_message:
         description: "Git commit message (version will be appended automatically)"
@@ -42,7 +38,7 @@ jobs:
   export-unpack-commit:
     runs-on: ubuntu-latest
 
-    # IMPORTANT: Secrets are read from GitHub Environment named MAIN.
+    # Secrets are read from GitHub Environment named MAIN
     environment: MAIN
 
     steps:
@@ -71,8 +67,7 @@ jobs:
       - name: Install Power Platform tools
         uses: microsoft/powerplatform-actions/actions-install@v1
 
-      # Get solution version BEFORE export so it can be used in ZIP filenames and the branch name.
-      # Uses curl --data-urlencode to avoid bash treating $select/$filter as shell variables.
+      # Retrieve solution version BEFORE export
       - name: Get solution version (Dataverse Web API)
         shell: bash
         env:
@@ -85,11 +80,9 @@ jobs:
           ENV_URL="${{ inputs.environment_url }}"
           SOL_NAME="${{ inputs.solution_name }}"
 
-          # Extract host from URL
           DATAVERSE_HOST="${ENV_URL#*://}"
           DATAVERSE_HOST="${DATAVERSE_HOST%%/*}"
 
-          # Get Entra token for Dataverse
           TOKEN=$(curl -sS -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             --data-urlencode "client_id=${CLIENT_ID}" \
@@ -98,7 +91,6 @@ jobs:
             --data-urlencode "scope=https://${DATAVERSE_HOST}/.default" \
             | python -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 
-          # Query solutions for version by uniquename
           RESP=$(curl -sS --get "${ENV_URL%/}/api/data/v9.0/solutions" \
             --data-urlencode '$select=uniquename,version' \
             --data-urlencode "\$filter=uniquename eq '${SOL_NAME}'" \
@@ -108,34 +100,29 @@ jobs:
           VERSION=$(echo "$RESP" | python -c "import sys,json; d=json.load(sys.stdin); v=d.get('value',[]); print(v[0].get('version','') if v else '')")
 
           if [[ -z "$VERSION" ]]; then
-            echo "Unable to retrieve solution version for ${SOL_NAME}. Response:" >&2
+            echo "Unable to retrieve solution version for ${SOL_NAME}" >&2
             echo "$RESP" >&2
             exit 1
           fi
 
+          SAFE_VER=$(echo "$VERSION" | tr '.' '_')
+
           echo "SOLUTION_VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "SOLUTION_VERSION_SAFE=$(echo "$VERSION" | tr '.' '_')" >> "$GITHUB_ENV"
+          echo "SOLUTION_VERSION_SAFE=$SAFE_VER" >> "$GITHUB_ENV"
+
           echo "Resolved solution version: $VERSION"
 
-      # UPDATED: branch naming convention uses version at the END: <solution>-<timestamp>-<version>
-      - name: Resolve target branch (version suffix)
+      # FIXED branch naming: <solution-name>-<version>
+      - name: Create versioned branch
         shell: bash
         run: |
           set -euo pipefail
           SOL="${{ inputs.solution_name }}"
-          IN_TARGET="${{ inputs.target_branch }}"
-          TS="$(date +'%Y%m%d-%H%M')"
           SAFE_SOL=$(echo "$SOL" | sed -E 's/[^a-zA-Z0-9_-]+/-/g' | sed -E 's/^-+|-+$//g')
-
-          if [[ -z "$IN_TARGET" ]]; then
-            TARGET="${SAFE_SOL}-${TS}-${SOLUTION_VERSION_SAFE}"
-          else
-            TARGET="$IN_TARGET"
-          fi
-
-          echo "TARGET_BRANCH=$TARGET" >> "$GITHUB_ENV"
-          git checkout -b "$TARGET"
-          echo "Using branch: $TARGET"
+          BRANCH="${SAFE_SOL}-${SOLUTION_VERSION_SAFE}"
+          echo "TARGET_BRANCH=$BRANCH" >> "$GITHUB_ENV"
+          git checkout -b "$BRANCH"
+          echo "Using branch: $BRANCH"
 
       - name: Prepare folders (clean)
         shell: bash
@@ -175,10 +162,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ls -al out/exported
           unzip -t "out/exported/${{ inputs.solution_name }}_${SOLUTION_VERSION_SAFE}.zip" > /dev/null
           unzip -t "out/exported/${{ inputs.solution_name }}_${SOLUTION_VERSION_SAFE}_managed.zip" > /dev/null
-          echo "ZIP integrity validated"
 
       - name: Unpack UNMANAGED into repo
         uses: microsoft/powerplatform-actions/unpack-solution@v1
@@ -187,7 +172,6 @@ jobs:
           solution-folder: solutions/${{ inputs.solution_name }}/unmanaged
           solution-type: Unmanaged
           overwrite-files: true
-          process-canvas-apps: false
 
       - name: Unpack MANAGED into repo
         uses: microsoft/powerplatform-actions/unpack-solution@v1
@@ -196,7 +180,6 @@ jobs:
           solution-folder: solutions/${{ inputs.solution_name }}/managed
           solution-type: Managed
           overwrite-files: true
-          process-canvas-apps: false
 
       - name: Commit changes
         shell: bash
@@ -204,10 +187,8 @@ jobs:
           set -euo pipefail
           git config user.name "${{ inputs.user_name }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
-
           git add -A
-          MSG="${{ inputs.commit_message }} (v${SOLUTION_VERSION})"
-          git commit -m "$MSG" || echo "No changes to commit"
+          git commit -m "${{ inputs.commit_message }} (v${SOLUTION_VERSION})" || echo "No changes to commit"
 
       - name: Push branch
         shell: bash
