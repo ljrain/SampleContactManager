@@ -1,9 +1,0 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
-<EntityRelationships xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <EntityRelationship Name="business_unit_ljr_noticealert" />
-  <EntityRelationship Name="lk_ljr_noticealert_createdby" />
-  <EntityRelationship Name="lk_ljr_noticealert_modifiedby" />
-  <EntityRelationship Name="owner_ljr_noticealert" />
-  <EntityRelationship Name="team_ljr_noticealert" />
-  <EntityRelationship Name="user_ljr_noticealert" />
-</EntityRelationships>
