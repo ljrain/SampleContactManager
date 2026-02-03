@@ -105,6 +105,7 @@ jobs:
           solution-name: ${{ inputs.solution_name }}
           solution-output-file: out/exported/${{ inputs.solution_name }}.zip
           cloud: UsGov
+          overwrite: true
 
       # 6. Export MANAGED solution ZIP
       - name: Export managed solution
@@ -118,6 +119,7 @@ jobs:
           solution-output-file: out/exported/${{ inputs.solution_name }}_managed.zip
           managed: true
           cloud: UsGov
+          overwrite: true
 
       # 7. ZIP integrity validation (prevents Central Directory corrupt errors)
       - name: Validate exported ZIPs
