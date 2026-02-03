@@ -46,13 +46,11 @@ jobs:
     environment: MAIN
 
     steps:
-      # 1) Checkout the repository at the specified source branch
       - name: Checkout source branch
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_branch }}
 
-      # 2) Validate required secrets exist (values are NOT printed)
       - name: Validate secrets
         shell: bash
         env:
@@ -70,12 +68,11 @@ jobs:
             exit 1
           fi
 
-      # 3) Install Power Platform tooling for the runner
       - name: Install Power Platform tools
         uses: microsoft/powerplatform-actions/actions-install@v1
 
-      # 4) Get the solution version from Dataverse (before export, so the version can be used in filenames/branch)
-      #    NOTE: the $ characters in OData params are escaped (\$select, \$filter) to avoid bash treating them as vars.
+      # Get solution version BEFORE export so it can be used in ZIP filenames and the branch name.
+      # Fixes common bash issue where $select/$filter get interpreted as shell variables under set -u.
       - name: Get solution version (Dataverse Web API)
         shell: bash
         env:
@@ -88,14 +85,9 @@ jobs:
           ENV_URL="${{ inputs.environment_url }}"
           SOL_NAME="${{ inputs.solution_name }}"
 
-          # Derive the Dataverse host for the token scope (e.g. org.crm9.dynamics.com)
-          DATAVERSE_HOST=$(python - <<'PY'
-import os
-from urllib.parse import urlparse
-u=os.environ['ENV_URL']
-print(urlparse(u).netloc)
-PY
-)
+          # Extract host from URL (no python required)
+          DATAVERSE_HOST="${ENV_URL#*://}"
+          DATAVERSE_HOST="${DATAVERSE_HOST%%/*}"
 
           # Get Entra token for Dataverse
           TOKEN=$(curl -sS -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token" \
@@ -108,8 +100,8 @@ PY
 
           # Query solutions for version by uniquename
           RESP=$(curl -sS --get "${ENV_URL%/}/api/data/v9.0/solutions" \
-            --data-urlencode "\\$select=uniquename,version" \
-            --data-urlencode "\\$filter=uniquename eq '${SOL_NAME}'" \
+            --data-urlencode '$select=uniquename,version' \
+            --data-urlencode "\$filter=uniquename eq '${SOL_NAME}'" \
             -H "Authorization: Bearer ${TOKEN}" \
             -H "Accept: application/json")
 
@@ -125,7 +117,6 @@ PY
           echo "SOLUTION_VERSION_SAFE=$(echo "$VERSION" | tr '.' '_')" >> "$GITHUB_ENV"
           echo "Resolved solution version: $VERSION"
 
-      # 5) Resolve branch name (include version in auto-generated branch) and checkout it
       - name: Resolve target branch (versioned)
         shell: bash
         run: |
@@ -145,18 +136,14 @@ PY
           git checkout -b "$TARGET"
           echo "Using branch: $TARGET"
 
-      # 6) Ensure working directories exist and are clean
       - name: Prepare folders (clean)
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p out/exported
-
-          # Remove any prior unpacked output so deletions are reflected in Git
           rm -rf "solutions/${{ inputs.solution_name }}" || true
           mkdir -p "solutions/${{ inputs.solution_name }}"
 
-      # 7) Export UNMANAGED solution ZIP with version in filename
       - name: Export UNMANAGED solution
         uses: microsoft/powerplatform-actions/export-solution@v1
         with:
@@ -170,7 +157,6 @@ PY
           managed: false
           overwrite: true
 
-      # 8) Export MANAGED solution ZIP with version in filename
       - name: Export MANAGED solution
         uses: microsoft/powerplatform-actions/export-solution@v1
         with:
@@ -184,7 +170,6 @@ PY
           managed: true
           overwrite: true
 
-      # 9) Validate ZIP integrity BEFORE unpack (catches HTML/JSON/partial files early)
       - name: Validate exported ZIPs
         shell: bash
         run: |
@@ -194,7 +179,6 @@ PY
           unzip -t "out/exported/${{ inputs.solution_name }}_${SOLUTION_VERSION_SAFE}_managed.zip" > /dev/null
           echo "ZIP integrity validated"
 
-      # 10) Unpack UNMANAGED ZIP directly into repo folder
       - name: Unpack UNMANAGED into repo
         uses: microsoft/powerplatform-actions/unpack-solution@v1
         with:
@@ -204,7 +188,6 @@ PY
           overwrite-files: true
           process-canvas-apps: false
 
-      # 11) Unpack MANAGED ZIP directly into repo folder
       - name: Unpack MANAGED into repo
         uses: microsoft/powerplatform-actions/unpack-solution@v1
         with:
@@ -214,7 +197,6 @@ PY
           overwrite-files: true
           process-canvas-apps: false
 
-      # 12) Commit changes (includes version in message for audit traceability)
       - name: Commit changes
         shell: bash
         run: |
@@ -223,11 +205,9 @@ PY
           git config user.email "${{ github.actor }}@users.noreply.github.com"
 
           git add -A
-
           MSG="${{ inputs.commit_message }} (v${SOLUTION_VERSION})"
           git commit -m "$MSG" || echo "No changes to commit"
 
-      # 13) Push the versioned branch
       - name: Push branch
         shell: bash
         run: |
