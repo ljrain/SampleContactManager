@@ -1,101 +1,107 @@
-name: Pull from Power Platform
-run-name: Pull from Power Platform ${{ github.event.inputs.solution_name }}
+name: Export solution from Power Platform (direct)
+
+run-name: Export ${{ github.event.inputs.solution_name }} from ${{ github.event.inputs.environment_url }}
 
 on:
   workflow_dispatch:
     inputs:
-      artifact_url:
-        description: "The url of the Dataverse record ID for the artifact created by the pipelines (Example: https://[your-env].crm.dynamics.com/api/data/v9.0/deploymentartifacts([id])/artifactfile/$value)"
+      environment_url:
+        description: "Dataverse environment URL (ex: https://yourenv.crm.dynamics.com)"
         required: true
+        default: "https://lougcc.crm9.dynamics.com/"
+        type: string
       solution_name:
-        description: "Name of the Solution in Dataverse environment"
+        description: "Solution unique name in Dataverse"
         required: true
-      user_name:
-        description: "User name for the commit"
-        required: true
+        default: "sample"
+        type: string
       source_branch:
-        description: "Branch for the solution commit"
-        required: true
-      target_branch:
-        description: "Branch to create for the solution commit"
+        description: "Branch to start from"
         required: false
+        default: "main"
+        type: string
+      target_branch:
+        description: "Branch to commit into (optional; defaults to source_branch)"
+        required: false
+        default: ""
+        type: string
       commit_message:
-        description: "Message to provide for the commit"
-        required: true
+        description: "Commit message"
+        required: false
+        default: "Export solution from Power Platform"
+        type: string
+      solution_type:
+        description: "Unmanaged or Managed"
+        required: false
+        default: "Unmanaged"
+        type: choice
+        options:
+          - Unmanaged
+          - Managed
 
 permissions:
   contents: write
 
 jobs:
   export-unpack-commit:
-    runs-on: ubuntu-latest
-    environment: MAIN
+    runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v3
         with:
           ref: ${{ github.event.inputs.source_branch }}
 
-      - name: Create new branch if specified
+      - name: Resolve branch defaults
         shell: pwsh
         run: |
-          if ('${{ github.event.inputs.target_branch }}' -ne '') {
-            git checkout -b '${{ github.event.inputs.target_branch }}' '${{ github.event.inputs.source_branch }}'
-          }
+          $source = "${{ github.event.inputs.source_branch }}"
+          if ([string]::IsNullOrWhiteSpace($source)) { $source = "main" }
 
-      - name: Download solution from artifact
-        env:
-          CLIENT_ID: ${{ secrets.CLIENT_ID }}
-          TENANT_ID: ${{ secrets.TENANT_ID }}
-          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          $target = "${{ github.event.inputs.target_branch }}"
+          if ([string]::IsNullOrWhiteSpace($target)) { $target = $source }
+
+          "SOURCE_BRANCH=$source" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TARGET_BRANCH=$target" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Create target branch (if different)
         shell: pwsh
         run: |
-          $aadHost = "login.microsoftonline.com"
-          $url = "${{ github.event.inputs.artifact_url }}"
-          $options = [System.StringSplitOptions]::RemoveEmptyEntries
-          $dataverseHost = $url.Split("://", $options)[1].Split("/")[0]
-
-          $body = @{
-            client_id     = $env:CLIENT_ID
-            client_secret = $env:CLIENT_SECRET
-            grant_type    = "client_credentials"
-            scope         = "https://$dataverseHost/.default"
+          if ("${{ env.TARGET_BRANCH }}" -ne "${{ env.SOURCE_BRANCH }}") {
+            git checkout -b "${{ env.TARGET_BRANCH }}" "${{ env.SOURCE_BRANCH }}"
           }
 
-          $OAuthReq = Invoke-RestMethod -Method Post -Uri "https://$aadHost/$($env:TENANT_ID)/oauth2/v2.0/token" -Body $body
-          $spnToken = $OAuthReq.access_token
-
-          $headers = @{
-            Authorization = "Bearer $spnToken"
-          }
-
-          # Artifact endpoint ends with /$value, so download to file directly
-          $outFile = "${{ github.event.inputs.solution_name }}.zip"
-          Invoke-WebRequest -Uri "${{ github.event.inputs.artifact_url }}" -Headers $headers -OutFile $outFile
+      # This is the direct export pattern you referenced:
+      # microsoft/powerplatform-actions/export-solution@v0 with environment-url/app-id/client-secret/tenant-id/solution-name [1](https://teams.microsoft.com/l/message/19:meeting_ZWI2ZWU0NzMtN2EyYi00MDc2LTljYTktZWMwYzBmN2M0YzAz@thread.v2/1759162120322?context=%7B%22contextType%22:%22chat%22%7D)[2](https://microsoft-my.sharepoint.com/personal/tidarius_microsoft_com/_layouts/15/Doc.aspx?sourcedoc=%7B2C79661B-A00C-45D2-96CB-DDF9143922EB%7D&file=ALM_GitHubActions_wPP%201.vsdx&action=default&mobileredirect=true&DefaultItemOpen=1)[3](https://microsoft-my.sharepoint.com/personal/tidarius_microsoft_com/_layouts/15/Doc.aspx?sourcedoc=%7B467298BA-9545-4F3D-9CD6-BA27BEB27612%7D&file=ALM_GitHubActions_wPP.vsdx&action=default&mobileredirect=true&DefaultItemOpen=1)
+      - name: Export solution
+        uses: microsoft/powerplatform-actions/export-solution@v0
+        with:
+          environment-url: ${{ github.event.inputs.environment_url }}
+          app-id: ${{ secrets.CLIENT_ID }}
+          client-secret: ${{ secrets.CLIENT_SECRET }}
+          tenant-id: ${{ secrets.TENANT_ID }}
+          solution-name: ${{ github.event.inputs.solution_name }}
+          solution-output-file: out/exported/${{ github.event.inputs.solution_name }}.zip
+          solution-type: ${{ github.event.inputs.solution_type }}
 
       - name: Unpack solution
         uses: microsoft/powerplatform-actions/unpack-solution@v0
         with:
-          solution-file: "${{ github.event.inputs.solution_name }}.zip"
-          solution-folder: "${{ github.event.repository.name }}"
-          solution-type: "Unmanaged"
+          solution-file: out/exported/${{ github.event.inputs.solution_name }}.zip
+          solution-folder: solutions/${{ github.event.inputs.solution_name }}
+          solution-type: ${{ github.event.inputs.solution_type }}
           overwrite-files: true
 
       - name: Commit changes
         shell: pwsh
         run: |
-          Remove-Item -Path "${{ github.event.inputs.solution_name }}.zip" -Force -ErrorAction SilentlyContinue
-          git config user.name "${{ github.event.inputs.user_name }}"
+          git config user.name "${{ github.actor }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
 
-          git pull
           git add --all
+          git commit -m "${{ github.event.inputs.commit_message }}" --allow-empty
 
-          git commit -m "${{ github.event.inputs.commit_message }}" || echo "No changes to commit."
-
-      - name: Push branch to GitHub
+      - name: Push branch
         shell: pwsh
         run: |
-          $branch = '${{ github.event.inputs.target_branch }}'
-          if ([string]::IsNullOrWhiteSpace($branch)) { $branch = '${{ github.event.inputs.source_branch }}' }
-          git push origin $branch
+          git push origin "${{ env.TARGET_BRANCH }}"
