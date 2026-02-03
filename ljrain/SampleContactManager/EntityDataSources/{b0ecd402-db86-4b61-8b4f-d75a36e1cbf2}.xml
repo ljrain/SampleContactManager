@@ -1,7 +1,0 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
-<EntityDataSource EntityDataSourceId="{b0ecd402-db86-4b61-8b4f-d75a36e1cbf2}" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <Name>VCP_DS_1b8e49be-2317-40fa-94e1-830599f06f1c</Name>
-  <ConnectionDefinition>%7B%0D%0A++%22appsenvironment%22%3A+null%2C%0D%0A++%22clientid%22%3A+null%2C%0D%0A++%22connectionreference%22%3A+null%2C%0D%0A++%22ConnectionReference%22%3A+%22ljr_sharedsharepointonl17a1da70bdda4ecabf3c8f94b1b65bb0%22%2C%0D%0A++%22ConnectorDataSource%22%3A+%22b0ecd402-db86-4b61-8b4f-d75a36e1cbf2%22%2C%0D%0A++%22connectortype%22%3A+null%2C%0D%0A++%22DatasetUnresolvedValue%22%3A+null%2C%0D%0A++%22DatasetValue%22%3A+%22https%25253A%25252F%25252Fgcccssenv.sharepoint.com%25252Fsites%25252FTestTeamSite%22%2C%0D%0A++%22hasacling%22%3A+true%2C%0D%0A++%22host%22%3A+null%2C%0D%0A++%22Name%22%3A+%22VCP_DS_1b8e49be-2317-40fa-94e1-830599f06f1c%22%2C%0D%0A++%22resource%22%3A+null%2C%0D%0A++%22tenant%22%3A+null%2C%0D%0A++%22userAuth%22%3A+false%0D%0A%7D</ConnectionDefinition>
-  <EntityDataProviderId>{b581d5dc-72e1-ea11-a81e-000d3af5fff1}</EntityDataProviderId>
-  <IsCustomizable>1</IsCustomizable>
-</EntityDataSource>
