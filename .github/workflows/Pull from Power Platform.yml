@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       environment_url:
-        description: "Dataverse environment URL (example: https://your-env.crm9.dynamics.com)"
+        description: "Dataverse environment URL (e.g., https://yourenv.crm9.dynamics.com)"
         required: true
         type: string
       solution_name:
@@ -19,7 +19,7 @@ on:
         default: "main"
         type: string
       target_branch:
-        description: "Branch to commit into (optional; defaults to source_branch if blank)"
+        description: "Branch to commit into (optional; if blank, auto-generated)"
         required: false
         default: ""
         type: string
@@ -49,7 +49,7 @@ jobs:
   export-unpack-commit:
     runs-on: windows-latest
 
-    # IMPORTANT: This must match your GitHub Environment name where secrets live
+    # IMPORTANT: this must match your GitHub Environment name where secrets live
     environment: MAIN
 
     steps:
@@ -58,14 +58,22 @@ jobs:
         with:
           ref: ${{ github.event.inputs.source_branch }}
 
-      - name: Resolve branch defaults
+      - name: Resolve branches (auto-prefix target branch)
         shell: pwsh
         run: |
           $source = "${{ github.event.inputs.source_branch }}"
           if ([string]::IsNullOrWhiteSpace($source)) { $source = "main" }
 
           $target = "${{ github.event.inputs.target_branch }}"
-          if ([string]::IsNullOrWhiteSpace($target)) { $target = $source }
+
+          if ([string]::IsNullOrWhiteSpace($target)) {
+            $sol = "${{ github.event.inputs.solution_name }}"
+            # yyyyMMdd-HHmm
+            $stamp = (Get-Date).ToString("yyyyMMdd-HHmm")
+            # make a safe branch name (strip spaces + illegal chars)
+            $safeSol = ($sol -replace '[^a-zA-Z0-9._-]', '-').Trim('-')
+            $target = "$safeSol-$stamp"
+          }
 
           "SOURCE_BRANCH=$source" | Out-File -FilePath $env:GITHUB_ENV -Append
           "TARGET_BRANCH=$target" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -73,19 +81,16 @@ jobs:
           Write-Host "SOURCE_BRANCH=$source"
           Write-Host "TARGET_BRANCH=$target"
 
-      - name: Create target branch (if different)
+      - name: Create target branch
         shell: pwsh
         run: |
-          if ($env:TARGET_BRANCH -ne $env:SOURCE_BRANCH) {
-            git checkout -b $env:TARGET_BRANCH $env:SOURCE_BRANCH
-          } else {
-            git checkout $env:SOURCE_BRANCH
-          }
+          git checkout -b $env:TARGET_BRANCH
 
-      # Optional, SAFE validation: confirms secrets are injected (does not print values)
-      - name: Validate auth secrets injected (safe)
+      - name: Validate secrets injected (no secret values printed)
         shell: pwsh
         run: |
           $missing = @()
           if ([string]::IsNullOrWhiteSpace("${{ secrets.CLIENT_ID }}")) { $missing += "CLIENT_ID" }
           if ([string]::IsNullOrWhiteSpace("${{ secrets.CLIENT_SECRET }}")) { $missing += "CLIENT_SECRET" }
+          if ([string]::IsNullOrWhiteSpace("${{ secrets.TENANT_ID }}")) { $missing += "TENANT_ID" }
+          if ($missing.Count -gt 0) {
