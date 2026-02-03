@@ -1,0 +1,118 @@
+name: Create Release from Latest Merged PR
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout repo (main already contains exported files)
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 2. Get most recent merged PR targeting main
+      - name: Get latest merged PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          PR_JSON=$(gh pr list \
+            --state merged \
+            --base main \
+            --limit 1 \
+            --json number,headRefName,title)
+
+          PR_COUNT=$(echo "$PR_JSON" | jq length)
+          if [[ "$PR_COUNT" -eq 0 ]]; then
+            echo "No merged PRs found. Exiting."
+            exit 1
+          fi
+
+          PR_NUMBER=$(echo "$PR_JSON" | jq -r '.[0].number')
+          PR_BRANCH=$(echo "$PR_JSON" | jq -r '.[0].headRefName')
+          PR_TITLE=$(echo "$PR_JSON" | jq -r '.[0].title')
+
+          echo "PR_NUMBER=$PR_NUMBER" >> $GITHUB_ENV
+          echo "PR_BRANCH=$PR_BRANCH" >> $GITHUB_ENV
+          echo "PR_TITLE=$PR_TITLE" >> $GITHUB_ENV
+
+          echo "Latest merged PR #$PR_NUMBER from branch $PR_BRANCH"
+
+      # 3. Derive version from branch name (<solution>-<version>)
+      - name: Derive release version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BRANCH="$PR_BRANCH"
+
+          # Version is everything after the last dash
+          VERSION_SAFE="${BRANCH##*-}"
+
+          if [[ -z "$VERSION_SAFE" ]]; then
+            echo "Could not derive version from branch name: $BRANCH"
+            exit 1
+          fi
+
+          VERSION="${VERSION_SAFE//_/.}"
+
+          echo "RELEASE_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "RELEASE_TAG=v$VERSION" >> $GITHUB_ENV
+
+          echo "Release version: v$VERSION"
+
+      # 4. Verify exported artifacts exist
+      - name: Verify exported artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -d "out/exported" ]]; then
+            echo "out/exported directory does not exist"
+            exit 1
+          fi
+
+          FILE_COUNT=$(ls out/exported | wc -l)
+          if [[ "$FILE_COUNT" -eq 0 ]]; then
+            echo "out/exported is empty"
+            exit 1
+          fi
+
+          echo "Found exported artifacts:"
+          ls -al out/exported
+
+      # 5. Create GitHub Release
+      - name: Create GitHub Release
+        id: release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Release ${{ env.RELEASE_TAG }}
+          body: |
+            Automated release created from PR #${{ env.PR_NUMBER }}
+
+            **Branch:** `${{ env.PR_BRANCH }}`
+            **Version:** `${{ env.RELEASE_VERSION }}`
+            **PR Title:** ${{ env.PR_TITLE }}
+
+            Contents:
+            - Managed solution ZIP
+            - Unmanaged solution ZIP
+
+          files: |
+            out/exported/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
