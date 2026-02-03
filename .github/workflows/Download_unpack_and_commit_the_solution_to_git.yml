@@ -1,152 +1,175 @@
-name: Download, unpack, and commit solution to git
+# GitHub Actions workflow to export a Power Platform solution
+# - Exports BOTH Unmanaged and Managed solution ZIPs
+# - Validates ZIP integrity to avoid "Central Directory corrupt" errors
+# - Unpacks both versions into source-controlled folders
+# - Commits and pushes changes to a new auto-prefixed branch
 
-run-name: Getting ${{ github.event.inputs.solution_name }} from pipelines host and committing
+name: Export Power Platform Solution (Managed + Unmanaged)
 
 on:
   workflow_dispatch:
     inputs:
-      artifact_url:
-        description: "Dataverse deployment artifact URL (…/deploymentartifacts(<id>)/artifactfile/$value)"
+      environment_url:
+        description: "Dataverse environment URL (e.g. https://org.crm.dynamics.com)"
         required: true
         type: string
       solution_name:
-        description: "Name of the Dataverse solution"
-        required: true
-        type: string
-      user_name:
-        description: "User name for git commit"
+        description: "Solution UNIQUE name in Dataverse (not display name)"
         required: true
         type: string
       source_branch:
-        description: "Source branch for commit"
+        description: "Branch to start from"
         required: true
+        default: "main"
         type: string
       target_branch:
-        description: "Optional branch to create"
+        description: "Target branch (leave blank to auto-generate)"
         required: false
+        default: ""
         type: string
       commit_message:
-        description: "Commit message"
+        description: "Git commit message"
         required: true
+        default: "Export Power Platform solution (managed + unmanaged)"
+        type: string
+      user_name:
+        description: "Git commit username"
+        required: true
+        default: "github-actions[bot]"
         type: string
 
 permissions:
   contents: write
 
-concurrency:
-  group: pipelines-export-${{ github.repository }}
-  cancel-in-progress: false
-
 jobs:
   export-unpack-commit:
     runs-on: ubuntu-latest
-
-    # ✅ THIS IS THE CRITICAL FIX
-    environment: MAIN
-
-    env:
-      CLIENT_ID: ${{ secrets.CLIENT_ID }}
-      TENANT_ID: ${{ secrets.TENANT_ID }}
-      CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+    environment: MAIN  # GitHub Environment containing CLIENT_ID / CLIENT_SECRET / TENANT_ID
 
     steps:
-      - name: Install Power Platform Tools
-        uses: microsoft/powerplatform-actions/actions-install@v1
+      # 1. Checkout the source branch
+      - name: Checkout source branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_branch }}
 
-      - name: Normalize branches
-        id: branches
+      # 2. Resolve target branch name (auto-generate if not provided)
+      - name: Resolve target branch
         shell: bash
         run: |
-          SB="$(echo '${{ github.event.inputs.source_branch }}' | xargs)"
-          TB="$(echo '${{ github.event.inputs.target_branch }}' | xargs)"
+          set -euo pipefail
+          SOL="${{ inputs.solution_name }}"
+          SRC="${{ inputs.source_branch }}"
+          IN_TARGET="${{ inputs.target_branch }}"
+          TS="$(date +'%Y%m%d-%H%M')"
+          SAFE_SOL="$(echo "$SOL" | sed -E 's/[^a-zA-Z0-9_-]+/-/g' | sed -E 's/^-+|-+$//g')"
+          if [[ -z "$IN_TARGET" ]]; then
+            TARGET="$SAFE_SOL-$TS"
+          else
+            TARGET="$IN_TARGET"
+          fi
+          echo "SOURCE_BRANCH=$SRC" >> "$GITHUB_ENV"
+          echo "TARGET_BRANCH=$TARGET" >> "$GITHUB_ENV"
+          git checkout -b "$TARGET"
 
-          if [[ "$SB" == "Source Branch" || "$SB" == "SourceBranch" || -z "$SB" ]]; then
-            SB="main"
+      # 3. Validate required secrets exist (values are NOT printed)
+      - name: Validate secrets
+        shell: bash
+        env:
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          TENANT_ID: ${{ secrets.TENANT_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ -z "$CLIENT_ID" ]] && missing+=("CLIENT_ID")
+          [[ -z "$CLIENT_SECRET" ]] && missing+=("CLIENT_SECRET")
+          [[ -z "$TENANT_ID" ]] && missing+=("TENANT_ID")
+          if (( ${#missing[@]} > 0 )); then
+            echo "Missing required secrets: ${missing[*]}"
+            exit 1
           fi
 
-          echo "source_branch=$SB" >> $GITHUB_OUTPUT
-          echo "target_branch=$TB" >> $GITHUB_OUTPUT
+      # 4. Install Power Platform CLI tools (recommended)
+      - name: Install Power Platform tools
+        uses: microsoft/powerplatform-actions/actions-install@v1
 
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      # 5. Export UNMANAGED solution ZIP
+      - name: Export unmanaged solution
+        uses: microsoft/powerplatform-actions/export-solution@v1
         with:
-          ref: ${{ steps.branches.outputs.source_branch }}
-          fetch-depth: 1
+          environment-url: ${{ inputs.environment_url }}
+          app-id: ${{ secrets.CLIENT_ID }}
+          client-secret: ${{ secrets.CLIENT_SECRET }}
+          tenant-id: ${{ secrets.TENANT_ID }}
+          solution-name: ${{ inputs.solution_name }}
+          solution-output-file: out/exported/${{ inputs.solution_name }}.zip
+          cloud: UsGov
 
-      - name: Create target branch (if specified)
-        if: ${{ steps.branches.outputs.target_branch != '' }}
-        shell: pwsh
+      # 6. Export MANAGED solution ZIP
+      - name: Export managed solution
+        uses: microsoft/powerplatform-actions/export-solution@v1
+        with:
+          environment-url: ${{ inputs.environment_url }}
+          app-id: ${{ secrets.CLIENT_ID }}
+          client-secret: ${{ secrets.CLIENT_SECRET }}
+          tenant-id: ${{ secrets.TENANT_ID }}
+          solution-name: ${{ inputs.solution_name }}
+          solution-output-file: out/exported/${{ inputs.solution_name }}_managed.zip
+          managed: true
+          cloud: UsGov
+
+      # 7. ZIP integrity validation (prevents Central Directory corrupt errors)
+      - name: Validate exported ZIPs
+        shell: bash
         run: |
-          git checkout -b "${{ steps.branches.outputs.target_branch }}"
+          set -euo pipefail
+          ls -al out/exported
+          unzip -t "out/exported/${{ inputs.solution_name }}.zip" > /dev/null
+          unzip -t "out/exported/${{ inputs.solution_name }}_managed.zip" > /dev/null
+          echo "ZIP integrity validated"
 
-      - name: Download solution from pipelines artifact
-        shell: pwsh
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:CLIENT_ID) `
-           -or [string]::IsNullOrWhiteSpace($env:TENANT_ID) `
-           -or [string]::IsNullOrWhiteSpace($env:CLIENT_SECRET)) {
-            throw "Missing required secrets: CLIENT_ID, TENANT_ID, CLIENT_SECRET"
-          }
-
-          $artifactUrl = "${{ github.event.inputs.artifact_url }}"
-          $uri = [System.Uri]$artifactUrl
-          $dataverseHost = "$($uri.Scheme)://$($uri.Host)"
-
-          $tokenUri = "https://login.microsoftonline.com/$($env:TENANT_ID)/oauth2/v2.0/token"
-
-          $body = @{
-            client_id     = $env:CLIENT_ID
-            client_secret = $env:CLIENT_SECRET
-            grant_type    = "client_credentials"
-            scope         = "$dataverseHost/.default"
-          }
-
-          $oauthReq = Invoke-RestMethod `
-            -Method Post `
-            -Uri $tokenUri `
-            -Body $body `
-            -ContentType "application/x-www-form-urlencoded"
-
-          $headers = @{
-            Authorization = "Bearer $($oauthReq.access_token)"
-            "Content-Type" = "application/json"
-          }
-
-          # Managed
-          $respManaged = Invoke-RestMethod -Uri $artifactUrl -Method GET -Headers $headers
-          $bytesManaged = [Convert]::FromBase64String($respManaged.value)
-          [IO.File]::WriteAllBytes("${{ github.event.inputs.solution_name }}_managed.zip", $bytesManaged)
-
-          # Unmanaged
-          $unmanagedUrl = $artifactUrl.Replace("artifactfile", "artifactfileunmanaged")
-          $respUnmanaged = Invoke-RestMethod -Uri $unmanagedUrl -Method GET -Headers $headers
-          $bytesUnmanaged = [Convert]::FromBase64String($respUnmanaged.value)
-          [IO.File]::WriteAllBytes("${{ github.event.inputs.solution_name }}.zip", $bytesUnmanaged)
-
+      # 8. Unpack UNMANAGED solution
       - name: Unpack unmanaged solution
         uses: microsoft/powerplatform-actions/unpack-solution@v1
         with:
-          solution-file: "${{ github.event.inputs.solution_name }}.zip"
-          solution-folder: "${{ github.repository }}"
+          solution-file: out/exported/${{ inputs.solution_name }}.zip
+          solution-folder: out/solutions/${{ inputs.solution_name }}/unmanaged
           solution-type: Unmanaged
-          process-canvas-apps: false
           overwrite-files: true
 
-      - name: Commit changes
-        shell: pwsh
-        run: |
-          Remove-Item *.zip -Force -ErrorAction SilentlyContinue
-          git config user.name "${{ github.event.inputs.user_name }}"
-          git config user.email "github-actions@users.noreply.github.com"
-          git pull
-          git add -A
-          git commit -m "${{ github.event.inputs.commit_message }}" --allow-empty
+      # 9. Unpack MANAGED solution
+      - name: Unpack managed solution
+        uses: microsoft/powerplatform-actions/unpack-solution@v1
+        with:
+          solution-file: out/exported/${{ inputs.solution_name }}_managed.zip
+          solution-folder: out/solutions/${{ inputs.solution_name }}/managed
+          solution-type: Managed
+          overwrite-files: true
 
-      - name: Push changes
-        shell: pwsh
+      # 10. Copy unpacked solutions into repo-controlled folders
+      - name: Copy unpacked solutions into repo
+        shell: bash
         run: |
-          if ("${{ steps.branches.outputs.target_branch }}" -ne "") {
-            git push origin "${{ steps.branches.outputs.target_branch }}"
-          } else {
-            git push origin "${{ steps.branches.outputs.source_branch }}"
-          }
+          set -euo pipefail
+          SOL="${{ inputs.solution_name }}"
+          rm -rf "solutions/$SOL"
+          mkdir -p "solutions/$SOL"
+          cp -R "out/solutions/$SOL"/* "solutions/$SOL/"
+
+      # 11. Commit changes
+      - name: Commit changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "${{ inputs.user_name }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git add .
+          git commit -m "${{ inputs.commit_message }}" || echo "No changes to commit"
+
+      # 12. Push branch
+      - name: Push branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push origin "$TARGET_BRANCH"
