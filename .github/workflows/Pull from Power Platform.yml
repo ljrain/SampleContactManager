@@ -1,4 +1,4 @@
-name: Download, unpack and commit the solution to git
+name: Pull from Power Platform
 run-name: Getting ${{ github.event.inputs.solution_name }} from pipelines host environment and committing
 
 on:
@@ -25,6 +25,13 @@ on:
 
 permissions:
   contents: write
+
+environment: MAIN
+
+env:
+  CLIENT_ID: ${{ secrets.CLIENT_ID }}
+  TENANT_ID: ${{ secrets.TENANT_ID }}
+  CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
 
 jobs:
   export-unpack-commit:
