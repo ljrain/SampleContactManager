@@ -78,6 +78,7 @@
       </Addresses>
     </Publisher>
     <RootComponents>
+      <RootComponent type="1" schemaName="account" behavior="2" />
       <RootComponent type="1" schemaName="ljr_noticealert" behavior="0" />
       <RootComponent type="1" schemaName="ljr_notices" behavior="0" />
       <RootComponent type="183" id="{b0ecd402-db86-4b61-8b4f-d75a36e1cbf2}" schemaName="VCP_DS_1b8e49be-2317-40fa-94e1-830599f06f1c" behavior="0" />
@@ -88,6 +89,10 @@
       <RootComponent type="80" schemaName="ljr_BasicApp" behavior="0" />
     </RootComponents>
     <MissingDependencies>
+      <MissingDependency>
+        <Required type="1" schemaName="account" displayName="Account" parentSchemaName="" solution="System (5.0)" />
+        <Dependent type="1" schemaName="account" displayName="Account" />
+      </MissingDependency>
       <MissingDependency>
         <Required type="181" schemaName="Virtual Connector Data Provider" displayName="Virtual Connector Data Provider" solution="msft_ConnectorProvider (9.1.0.445)" id="{b581d5dc-72e1-ea11-a81e-000d3af5fff1}">
           <package appName="Virtual Connectors Data Provider Package" version="9.1.0.445">msft_ConnectorProviderAnchor (9.1.0.445)</package>
